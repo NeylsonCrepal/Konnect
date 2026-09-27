@@ -13,7 +13,7 @@ const PCM_IDENTIFIER: &str = "com.github.mixelpixx.konnect";
 
 pub(crate) async fn collect(config: &ServerConfig, resolution: &ConfigResolution) -> Value {
     let running_version = env!("CARGO_PKG_VERSION");
-    let executable_path = std::env::current_exe().ok();
+    let executable_path = installed_executable_path().ok();
     let installation = executable_path
         .as_deref()
         .map(classify_installation)
@@ -228,6 +228,26 @@ async fn probe_command_version(path: &Path, command_kind: VersionCommand) -> Ver
     }
 }
 
+/// The path the serving binary is installed at. On Linux `current_exe()` reads
+/// `/proc/self/exe`, which gains a ` (deleted)` suffix once an update replaces
+/// the file; the installed path, now holding the update, is the link without it.
+pub(crate) fn installed_executable_path() -> std::io::Result<PathBuf> {
+    let path = std::env::current_exe()?;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let path = without_deleted_suffix(path);
+    Ok(path)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn without_deleted_suffix(path: PathBuf) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    match path.as_os_str().as_bytes().strip_suffix(b" (deleted)") {
+        // A file really named "... (deleted)" keeps its name.
+        Some(installed) if !path.exists() => PathBuf::from(std::ffi::OsStr::from_bytes(installed)),
+        _ => path,
+    }
+}
+
 /// Probe a Konnect executable for the version it reports. Reload validation
 /// uses the same parser and timeout as installation diagnostics so the two
 /// paths cannot disagree about whether a candidate is runnable.
@@ -324,6 +344,24 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn only_a_missing_path_loses_the_deleted_suffix() {
+        let temp = tempfile::tempdir().unwrap();
+        let real_path = temp.path().join("konnect (deleted)");
+        std::fs::write(&real_path, b"").unwrap();
+        assert_eq!(without_deleted_suffix(real_path.clone()), real_path);
+
+        let unlinked_path = temp.path().join("gone (deleted)");
+        assert_eq!(
+            without_deleted_suffix(unlinked_path),
+            temp.path().join("gone")
+        );
+
+        let missing_path = temp.path().join("missing");
+        assert_eq!(without_deleted_suffix(missing_path.clone()), missing_path);
+    }
 
     #[test]
     fn verified_pcm_manifest_is_required_for_pcm_classification() {

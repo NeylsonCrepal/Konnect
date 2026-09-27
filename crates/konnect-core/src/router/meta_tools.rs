@@ -388,7 +388,7 @@ async fn handle_reload_server(args: &Value, reload: &ReloadControl) -> CallToolR
         );
     }
 
-    let executable = match std::env::current_exe() {
+    let executable = match crate::runtime_info::installed_executable_path() {
         Ok(path) => path,
         Err(error) => {
             return CallToolResult::error_kind(
@@ -851,5 +851,106 @@ mod reload_tests {
                 .expect("enabled Unix reload dispatches");
         assert!(result.is_error);
         assert!(control.take().is_none());
+    }
+
+    const REPLACED_BINARY_CHILD: &str = "KONNECT_TEST_REPLACED_BINARY_CHILD";
+
+    /// Runs this test binary as the "server" from a link in a scratch dir,
+    /// replaces the file at that path with a new inode, then has the child
+    /// call both tools (#699).
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[tokio::test]
+    async fn tools_follow_the_installed_path_after_the_running_binary_is_replaced() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::fs::PermissionsExt;
+
+        if let Some(installed_path) = std::env::var_os(REPLACED_BINARY_CHILD) {
+            println!("ready");
+            std::io::stdout().flush().unwrap();
+            std::io::stdin().read_line(&mut String::new()).unwrap();
+            let installed_text = installed_path.to_str().unwrap();
+            let text = |result: CallToolResult| -> Value {
+                let result = serde_json::to_value(result).unwrap();
+                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+            };
+
+            // Precondition set by the kernel, not by Konnect.
+            assert_eq!(
+                std::env::current_exe().unwrap().to_str().unwrap(),
+                format!("{installed_text} (deleted)")
+            );
+            let control = ReloadControl::default();
+            control.enable();
+            let info = handle_meta_tool_with_reload(
+                "get_installation_info",
+                &json!({}),
+                &context(),
+                &control,
+            )
+            .await
+            .unwrap();
+            let info = text(info);
+            assert_eq!(info["runtime"]["executable_path"], installed_text);
+            assert_eq!(
+                info["installation"]["binary_on_disk"],
+                json!({"probe_status": "ok", "version": "99.0.0", "newer_than_running": true})
+            );
+
+            let reload = handle_meta_tool_with_reload(
+                "reload_server",
+                &json!({"confirm": true, "allow_same_version": true}),
+                &context(),
+                &control,
+            )
+            .await
+            .unwrap();
+            // The script cannot pass the descriptor probe (its interpreter cannot
+            // reopen a close-on-exec fd), but reaching the probe proves the open.
+            assert!(reload.is_error);
+            let message = text(reload)["message"].as_str().unwrap().to_string();
+            assert!(
+                message.starts_with(&format!(
+                    "reload_server refused the binary at {installed_text} because its version probe"
+                )),
+                "{message}"
+            );
+            return;
+        }
+
+        // A hard link beside the test binary: no copy, and no write handle to
+        // make exec fail with ETXTBSY.
+        let test_binary = std::env::current_exe().unwrap();
+        let directory = tempfile::tempdir_in(test_binary.parent().unwrap()).unwrap();
+        let installed_path = directory.path().join("konnect");
+        std::fs::hard_link(&test_binary, &installed_path).unwrap();
+        let mut child = std::process::Command::new(&installed_path)
+            .args([
+                "--exact",
+                "router::meta_tools::reload_tests::tools_follow_the_installed_path_after_the_running_binary_is_replaced",
+                "--nocapture",
+            ])
+            .env(REPLACED_BINARY_CHILD, &installed_path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap())
+            .lines()
+            .map(Result::unwrap);
+        // With one test thread, libtest's "test … ... " prefix shares the line.
+        assert!(lines.by_ref().any(|line| line.ends_with("ready")));
+
+        // Replace the file the way install(1) or a package manager does.
+        let staged_path = directory.path().join("konnect.new");
+        std::fs::write(&staged_path, "#!/bin/sh\necho 'konnect 99.0.0'\n").unwrap();
+        std::fs::set_permissions(&staged_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&staged_path, &installed_path).unwrap();
+        child.stdin.take().unwrap().write_all(b"\n").unwrap();
+
+        let output: Vec<String> = lines.collect();
+        assert!(
+            child.wait().unwrap().success(),
+            "child failed:\n{output:#?}"
+        );
     }
 }
