@@ -372,9 +372,10 @@ pub enum OutlineShape {
     /// all-or-nothing rule [`board_outline_bbox`] always used.
     Missing,
     /// Provably an axis-aligned rectangle: a single `gr_rect`, a single
-    /// axis-aligned 4-vertex `gr_poly`, or exactly four `gr_line` segments
-    /// closing into an axis-aligned rectangle. Bbox containment against
-    /// this shape is exact containment, not an approximation.
+    /// 4-vertex `gr_poly` whose edges, in order, are the rectangle's four
+    /// sides, or exactly four `gr_line` segments that are its four sides,
+    /// each once. Bbox containment against this shape is exact containment,
+    /// not an approximation.
     Rectangular { bbox: (f64, f64, f64, f64) },
     /// Edge.Cuts geometry that parses cleanly but is not provably
     /// rectangular — any arc, circle, or curve; a rotated or non-4-vertex
@@ -432,16 +433,21 @@ pub fn board_outline_shape(tree: &SexpNode) -> OutlineShape {
 
 /// Whether `edges` (the full Edge.Cuts graphic set, in source order) reduces
 /// to exactly one axis-aligned rectangle: a single `gr_rect`; a single
-/// `gr_poly` whose deduplicated vertices are exactly the four bbox corners;
-/// or exactly four `gr_line` segments, each axis-aligned, whose endpoints
-/// are exactly the four bbox corners.
+/// `gr_poly` whose deduplicated vertices, taken in order, trace the bbox
+/// perimeter; or exactly four `gr_line` segments that are the bbox's four
+/// sides, each exactly once.
+///
+/// Corner membership alone is not a proof: four lines can touch all four
+/// corners while one side is doubled and another missing (an open outline),
+/// and a polygon's four corners in bow-tie order cross itself. Both reduce
+/// to [`is_bbox_perimeter`], which checks the sides, not the points.
 fn is_axis_aligned_rectangle(edges: &[(&str, &SexpNode)], bbox: (f64, f64, f64, f64)) -> bool {
     let (x0, y0, x1, y1) = bbox;
     if x0 >= x1 || y0 >= y1 {
         return false; // Degenerate (zero-area) bbox proves nothing.
     }
-    let corners = [(x0, y0), (x0, y1), (x1, y0), (x1, y1)];
-    let is_corner = |p: (f64, f64)| corners.iter().any(|c| close(*c, p));
+    // Perimeter order: corner `i` and corner `(i + 1) % 4` share a side.
+    let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
 
     match edges {
         [("gr_rect", _)] => true,
@@ -461,34 +467,53 @@ fn is_axis_aligned_rectangle(edges: &[(&str, &SexpNode)], bbox: (f64, f64, f64, 
             if verts.len() > 1 && verts.first() == verts.last() {
                 verts.pop();
             }
-            verts.len() == 4
-                && verts.iter().all(|v| is_corner(*v))
-                && all_corners_covered(&verts, &corners)
+            if verts.len() != 4 {
+                return false;
+            }
+            // The polygon closes implicitly: its sides are consecutive
+            // vertex pairs, including last → first.
+            let sides: Vec<_> = (0..4).map(|i| (verts[i], verts[(i + 1) % 4])).collect();
+            is_bbox_perimeter(&sides, &corners)
         }
         [("gr_line", _), ("gr_line", _), ("gr_line", _), ("gr_line", _)] => {
-            let mut verts: Vec<(f64, f64)> = Vec::new();
+            let mut sides = Vec::with_capacity(4);
             for (_, node) in edges {
                 let (Some(s), Some(e)) = (point(node, "start"), point(node, "end")) else {
                     return false;
                 };
-                let axis_aligned = close_scalar(s.0, e.0) || close_scalar(s.1, e.1);
-                if !axis_aligned || !is_corner(s) || !is_corner(e) {
-                    return false;
-                }
-                verts.push(s);
-                verts.push(e);
+                sides.push((s, e));
             }
-            all_corners_covered(&verts, &corners)
+            is_bbox_perimeter(&sides, &corners)
         }
         _ => false,
     }
 }
 
-/// Every bbox corner appears in `verts` (order and duplicate count aside) —
-/// rules out four collinear or repeated points passing the per-point corner
-/// check above.
-fn all_corners_covered(verts: &[(f64, f64)], corners: &[(f64, f64); 4]) -> bool {
-    corners.iter().all(|c| verts.iter().any(|v| close(*c, *v)))
+/// One straight outline edge, `(start, end)`.
+type Segment = ((f64, f64), (f64, f64));
+
+/// Whether `sides` are exactly the four sides of the rectangle whose
+/// `corners` are given in perimeter order — each side present once, in
+/// either direction. Four such sides are necessarily axis-aligned, connected
+/// and closed, with no diagonal or self-crossing edge: a side joining
+/// opposite corners, a repeated side (which leaves another missing), or an
+/// endpoint off the corners fails.
+fn is_bbox_perimeter(sides: &[Segment], corners: &[(f64, f64); 4]) -> bool {
+    let corner_index = |p: (f64, f64)| corners.iter().position(|c| close(*c, p));
+    let mut seen = [false; 4];
+    for &(a, b) in sides {
+        let (Some(i), Some(j)) = (corner_index(a), corner_index(b)) else {
+            return false;
+        };
+        if j == (i + 1) % 4 {
+            seen[i] = true;
+        } else if i == (j + 1) % 4 {
+            seen[j] = true;
+        } else {
+            return false; // Same corner twice, or opposite corners (a diagonal).
+        }
+    }
+    sides.len() == 4 && seen == [true; 4]
 }
 
 fn close_scalar(a: f64, b: f64) -> bool {
@@ -1658,6 +1683,81 @@ mod tests {
                 bbox: (0.0, 0.0, 100.0, 50.0)
             }
         );
+    }
+
+    #[test]
+    fn outline_shape_reversed_and_explicitly_closed_gr_poly_is_rectangular() {
+        // Clockwise, starting mid-perimeter, with the first vertex repeated
+        // at the end: still the four sides once each.
+        let tree = parse_sexp(
+            "(kicad_pcb\n\
+             \t(gr_poly (pts (xy 100 50) (xy 100 0) (xy 0 0) (xy 0 50) (xy 100 50)) (layer \"Edge.Cuts\"))\n\
+             )",
+        )
+        .unwrap();
+        assert_eq!(
+            board_outline_shape(&tree),
+            OutlineShape::Rectangular {
+                bbox: (0.0, 0.0, 100.0, 50.0)
+            }
+        );
+    }
+
+    #[test]
+    fn outline_shape_bow_tie_gr_poly_is_unproven() {
+        // All four bbox corners, but in crossing order: the polygon's
+        // implicit sides include both diagonals, so it is not a rectangle.
+        let tree = parse_sexp(
+            "(kicad_pcb\n\
+             \t(gr_poly (pts (xy 0 0) (xy 100 50) (xy 100 0) (xy 0 50)) (layer \"Edge.Cuts\"))\n\
+             )",
+        )
+        .unwrap();
+        assert_eq!(
+            board_outline_shape(&tree),
+            OutlineShape::Unproven {
+                bbox: (0.0, 0.0, 100.0, 50.0)
+            }
+        );
+    }
+
+    #[test]
+    fn outline_shape_gr_lines_with_a_doubled_side_and_a_missing_side_are_unproven() {
+        // Every corner is touched and every line is axis-aligned, but the
+        // top side appears twice and the bottom side is missing: the outline
+        // is open.
+        let tree = parse_sexp(
+            "(kicad_pcb\n\
+             \t(gr_line (start 0 0) (end 100 0) (layer \"Edge.Cuts\"))\n\
+             \t(gr_line (start 100 0) (end 0 0) (layer \"Edge.Cuts\"))\n\
+             \t(gr_line (start 0 0) (end 0 50) (layer \"Edge.Cuts\"))\n\
+             \t(gr_line (start 100 0) (end 100 50) (layer \"Edge.Cuts\"))\n\
+             )",
+        )
+        .unwrap();
+        assert_eq!(
+            board_outline_shape(&tree),
+            OutlineShape::Unproven {
+                bbox: (0.0, 0.0, 100.0, 50.0)
+            }
+        );
+    }
+
+    #[test]
+    fn outline_shape_gr_lines_with_a_diagonal_are_unproven() {
+        let tree = parse_sexp(
+            "(kicad_pcb\n\
+             \t(gr_line (start 0 0) (end 100 0) (layer \"Edge.Cuts\"))\n\
+             \t(gr_line (start 100 0) (end 100 50) (layer \"Edge.Cuts\"))\n\
+             \t(gr_line (start 100 50) (end 0 50) (layer \"Edge.Cuts\"))\n\
+             \t(gr_line (start 0 50) (end 100 0) (layer \"Edge.Cuts\"))\n\
+             )",
+        )
+        .unwrap();
+        assert!(matches!(
+            board_outline_shape(&tree),
+            OutlineShape::Unproven { .. }
+        ));
     }
 
     #[test]
