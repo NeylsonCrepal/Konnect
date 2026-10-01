@@ -14,7 +14,9 @@ handler moves to a new entry with the current matcher, and the user's handler
 keeps its own. An install whose matcher is already current is not rewritten.
 Extra copies of Konnect's handler, such as a hand edit can leave, are removed
 so that each hook runs once.
-The `Hooks: N entries patched` count now includes refreshed entries (#739).
+The `Hooks: N entries patched` count now includes refreshed entries and a
+removed legacy handler, so it is non-zero whenever the hook settings changed
+(#739).
 
 ## Unreleased: `create_schematic` and `set_schematic_page` move to `sch_hierarchy` (minor release)
 
