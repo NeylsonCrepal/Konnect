@@ -227,7 +227,9 @@ pub fn tools() -> Vec<ToolDef> {
             "validate_sheet_pins",
             "Read-only. Walk the whole sheet tree from a root schematic and report \
              hierarchical_labels with no matching parent sheet pin, and sheet pins with no \
-             matching child hierarchical_label. Does not modify anything — use as a pre-ERC \
+             matching child hierarchical_label. Also reports stored pin positions that disagree \
+             with their rotation-selected sheet edge, including positions past a corner. \
+             Does not modify anything — use as a pre-ERC \
              sanity check or to catch drift after manual edits.",
             json!({
                 "type": "object",
@@ -2168,6 +2170,40 @@ fn collect_pin_mismatches(
 
     for sheet in sch.sheets.iter() {
         let child_path = dir.join(sheet.file());
+        // Check the parent geometry even if its child is unavailable. KiCad
+        // relocates inconsistent pins on load and can silently join their nets.
+        for pin in &sheet.pins {
+            let (x, y) = pin.position();
+            let side = sheet_pin_side_for_rotation(pin.at.rotation);
+            let invalid = match side {
+                Some(side) => {
+                    ensure_pin_is_on_sheet_edge(SheetBox::of(sheet), sheet.name(), side, x, y)
+                        .is_err()
+                }
+                None => true,
+            };
+            if invalid {
+                let expected_edge = side.and_then(|side| SheetBox::of(sheet).edge(side));
+                issues.push(json!({
+                    "schematic": path.display().to_string(),
+                    "sheet": sheet.name(),
+                    "file": sheet.file(),
+                    "pin": pin.name,
+                    "kind": if side.is_some() { "pin_position_mismatch" } else { "invalid_pin_rotation" },
+                    "stored_position": { "x": x, "y": y, "rotation": pin.at.rotation },
+                    "expected_edge": expected_edge.map(|edge| json!({
+                        "side": side,
+                        "axis": edge.axis,
+                        "coordinate": edge.coordinate,
+                        "span_axis": edge.span_axis,
+                        "span_start": edge.span_start,
+                        "span_end": edge.span_end
+                    })),
+                    "error": "Stored sheet-pin position/rotation does not identify a valid point on its sheet edge; KiCad may relocate the pin and merge nets",
+                    "recovery": "Choose the intended side and an on-edge position with edit_sheet_pin, then inspect the KiCad netlist before continuing; this validator does not repair pins"
+                }));
+            }
+        }
         if !child_path.exists() {
             issues.push(json!({
                 "sheet": sheet.name(),
@@ -4608,7 +4644,7 @@ mod tests {
         // Label with no pin, and (below) a pin with no label — deliberate mismatch.
         add_label(&child_path, "VIN", "input", 5.0, 5.0);
         handle_add_sheet_pin(
-            &json!({ "schematic": root.display().to_string(), "sheet_name": "Power", "pin_name": "GND", "pin_type": "passive", "x": 90.0, "y": 55.0 }),
+            &json!({ "schematic": root.display().to_string(), "sheet_name": "Power", "pin_name": "GND", "pin_type": "passive", "x": 130.0, "y": 55.0 }),
             &ctx,
         )
         .await

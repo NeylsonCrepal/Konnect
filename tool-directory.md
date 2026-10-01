@@ -226,7 +226,7 @@ and Windows servers do not.
 | `add_sheet_pin` | Manually add a single pin to an existing sheet block. Optional `side` (`right`, `left`, `top`, `bottom`) selects the edge by writing the rotation KiCad reads it from, and makes the call validate `x`/`y` against that edge on both axes, corners included — an off-edge position is refused rather than written and then relocated by KiCad on load. Omitting `side` keeps the previous behavior: rotation `0` and no position check. `x`, `y`, and `side` in the response are read back off the saved pin. |
 | `edit_sheet_pin` | Rename a pin, change its electrical type, reposition it along the sheet border, or move it to another edge with the optional `side` (`right`, `left`, `top`, `bottom`). `side` is judged against the position the pin ends up with, so `side` and `x`+`y` in one call are checked together. `changed_fields` names only what actually differs — restating the side a pin already has is an honest no-op that writes nothing — alongside `requested_fields` and the `pin` read back off the file. |
 | `delete_sheet_pin` | Remove a single pin without touching the rest of the sheet. |
-| `validate_sheet_pins` | Read-only. Walk the sheet tree and report hierarchical_labels with no matching parent pin, and pins with no matching child label. |
+| `validate_sheet_pins` | Read-only. Walk the sheet tree and report unmatched hierarchical labels/pins and stored pin positions inconsistent with their rotation-selected edge or its span. Geometry findings identify the pin, stored position, expected edge and recovery action; no pins are repaired. |
 
 ---
 

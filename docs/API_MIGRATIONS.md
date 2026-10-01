@@ -3,6 +3,23 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: sheet-pin geometry findings
+
+`validate_sheet_pins` keeps its read-only `issue_count` / `issues` response,
+and now counts stored sheet pins whose position disagrees with their
+rotation-selected edge or lies past its corner. New geometry entries have
+`kind: pin_position_mismatch` (or `invalid_pin_rotation` when no edge is
+identified), `schematic`, `sheet`, `file`, `pin`, `stored_position`,
+`expected_edge`, `error`, and `recovery`. An expected edge names its side,
+fixed axis/coordinate and the other axis's finite span. An invalid rotation
+has no expected edge. Existing label-name and missing-child findings remain.
+
+Inspect these findings before loading/resaving in KiCad: KiCad may relocate
+an inconsistent pin onto another pin and join their nets without an ERC
+warning. Correct the intended side/position explicitly with `edit_sheet_pin`
+and verify the netlist. The validator does not modify either schematic, and
+the existing add/edit behavior when `side` is omitted is unchanged (#687).
+
 ## Unreleased: reading the board's physical stackup (minor release)
 
 The `pcb_board` toolset adds `get_board_stackup`. It reads the physical
