@@ -152,6 +152,8 @@ The server checks each client once per installed guidance version, identified
 by the install marker alone. A new binary over the same marker does not
 rescan. The first start for a marker scans and records the
 state in `~/.konnect/.guidance-checked-claude` or `.guidance-checked-codex`.
+`konnect init` and `konnect uninstall` delete that client's record, so a
+re-init with the same version is checked again.
 Each client entry carries `checked`: `now` when this process scanned, or
 `earlier` when it reuses the record. An `earlier` entry has `state` and
 `marker` but no `files` or `hooks`.

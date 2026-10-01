@@ -342,6 +342,9 @@ fn run_install_at(client: InstallClient, paths: &InstallPaths, verbose: bool) ->
 
     fs::create_dir_all(paths.data_dir())?;
     fs::write(paths.marker(client), env!("CARGO_PKG_VERSION"))?;
+    // The recorded check described the guidance this install just replaced;
+    // a same-version re-init leaves the marker unchanged, so drop it.
+    remove_if_present(&paths.guidance_checked(client))?;
 
     if verbose {
         match client {
@@ -466,6 +469,7 @@ fn run_uninstall_at(client: InstallClient, paths: &InstallPaths, verbose: bool) 
     }
 
     remove_if_present(&paths.marker(client))?;
+    remove_if_present(&paths.guidance_checked(client))?;
     if verbose {
         println!("\nDone.");
     }
@@ -1855,6 +1859,49 @@ mod tests {
         assert_eq!(other_bundle.detail()["claude"]["checked"], "earlier");
         assert_eq!(other_bundle.take_notice(), None);
         assert_eq!(start(&temp).detail()["claude"]["checked"], "earlier");
+    }
+
+    /// Re-running `konnect init` with the same version restores the guidance
+    /// but keeps the marker, so the record from before must not outlive it.
+    #[test]
+    fn a_same_version_reinstall_is_checked_again() {
+        use konnect_core::guidance::GuidanceProbe;
+        let temp = TempDir::new().unwrap();
+        let paths = test_paths(&temp);
+        run_install_at(InstallClient::Claude, &paths, false).unwrap();
+        let skill = paths
+            .skills_dir(InstallClient::Claude)
+            .join("konnect/SKILL.md");
+        fs::write(&skill, "edited").unwrap();
+        let edited = start(&temp);
+        assert_eq!(edited.detail()["claude"]["state"], "out_of_sync");
+        assert!(edited.take_notice().is_some());
+
+        run_install_at(InstallClient::Claude, &paths, false).unwrap();
+        let reinstalled = start(&temp);
+        let detail = reinstalled.detail();
+        assert_eq!(detail["claude"]["checked"], "now");
+        assert_eq!(detail["claude"]["state"], "current");
+        assert_eq!(
+            detail["claude"]["marker"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(reinstalled.take_notice(), None);
+        assert_eq!(start(&temp).detail()["claude"]["checked"], "earlier");
+    }
+
+    #[test]
+    fn uninstall_removes_the_recorded_check() {
+        use konnect_core::guidance::GuidanceProbe;
+        let temp = TempDir::new().unwrap();
+        let paths = test_paths(&temp);
+        for client in [InstallClient::Claude, InstallClient::Codex] {
+            run_install_at(client, &paths, false).unwrap();
+        }
+        start(&temp).detail();
+        run_uninstall_at(InstallClient::Codex, &paths, false).unwrap();
+        assert!(!paths.guidance_checked(InstallClient::Codex).exists());
+        assert!(paths.guidance_checked(InstallClient::Claude).exists());
     }
 
     #[test]

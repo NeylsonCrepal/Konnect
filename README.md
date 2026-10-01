@@ -184,7 +184,7 @@ Guidance written by an older `konnect init` is not updated by upgrading the
 binary. `konnect status` compares every installed skill, agent, and hook with
 the bundle in the binary you run and marks each `current`, `different`, or
 `missing`. The server makes the same check once for each installed version:
-the first start after `konnect init` or an upgrade compares the files, records
+the first start after `konnect init` compares the files, records
 the result in `~/.konnect`, and adds a one-line notice to its `initialize`
 instructions if guidance is out of sync. Later starts reuse that record, so
 guidance you chose to keep is not reported again. `get_installation_info`
