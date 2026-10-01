@@ -242,6 +242,21 @@ option differs from its default, each `added` entry also reports `direction`,
 `label` (`x`, `y`, `rotation`) and, for a drawn stub, `wire`. The top level
 then also reports `stub_length` and `label_type`.
 
+## Unreleased: `reload_server` and `get_installation_info` follow a replaced binary on Linux (patch release)
+
+On Linux, once an update replaced the file at the serving binary's path,
+`/proc/self/exe` gained a ` (deleted)` suffix. Both tools used that path
+literally: `reload_server` failed with "could not open the Konnect binary at
+… (deleted)", and `get_installation_info` reported
+`binary_on_disk.probe_status: "launch_failed"` (#699).
+
+When that suffixed path does not exist, both now use it without the suffix,
+which is the installed path holding the update. `reload_server` probes and
+loads that file under its existing version checks. `get_installation_info`
+reports it as `runtime.executable_path` and probes it for `binary_on_disk`, so
+`newer_than_running` reflects the pending update. Other platforms, and a
+Linux binary that was not replaced, are unaffected.
+
 ## Unreleased: an omitted reference keeps the library prefix (patch release)
 
 `add_schematic_component` and `batch_place_components` wrote a bare `?` when
