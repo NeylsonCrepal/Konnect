@@ -125,6 +125,13 @@ impl McpHandler {
         self.reload.enable();
     }
 
+    /// Let `initialize` and `get_installation_info` report installed guidance
+    /// drift. Only the standalone binary, which embeds the bundle, calls this;
+    /// a second call is ignored.
+    pub fn set_guidance_probe(&self, probe: Arc<dyn crate::guidance::GuidanceProbe>) {
+        let _ = self.ctx.guidance.set(probe);
+    }
+
     pub fn take_reload_request(&self) -> Option<meta_tools::ReloadPlan> {
         self.reload.take()
     }
@@ -211,7 +218,12 @@ impl McpHandler {
             // ── Lifecycle ──────────────────────────────────────────────────
             "initialize" => {
                 self.adapt_to_client(req.params.as_ref()).await;
-                let result = McpServerState::build_initialize_result();
+                let notice = self
+                    .ctx
+                    .guidance
+                    .get()
+                    .and_then(|probe| probe.take_notice());
+                let result = McpServerState::build_initialize_result(notice);
                 Ok(Some(serde_json::to_value(result)?))
             }
             "notifications/initialized" => Ok(None),
@@ -2352,6 +2364,47 @@ mod client_adaptation_tests {
             .await
             .expect("initialize dispatches");
         assert_eq!(listed_tool_count(&handler).await, starter);
+    }
+
+    struct FixedProbe(Option<&'static str>);
+
+    impl crate::guidance::GuidanceProbe for FixedProbe {
+        fn detail(&self) -> Value {
+            json!({"probe_status": "ok"})
+        }
+
+        fn take_notice(&self) -> Option<String> {
+            self.0.map(str::to_string)
+        }
+    }
+
+    async fn initialize_result(handler: &McpHandler) -> Value {
+        handler
+            .dispatch(&request("initialize", initialize_from("claude-code")))
+            .await
+            .expect("initialize dispatches")
+            .expect("initialize returns a result")
+    }
+
+    /// Drift reaches the model through `instructions` (#728); with nothing
+    /// to report, or no probe at all, the field is absent rather than empty.
+    #[tokio::test]
+    async fn initialize_carries_a_guidance_notice_only_when_there_is_one() {
+        let bare = lazy_handler().await;
+        assert!(initialize_result(&bare).await.get("instructions").is_none());
+
+        let quiet = lazy_handler().await;
+        quiet.set_guidance_probe(Arc::new(FixedProbe(None)));
+        assert!(initialize_result(&quiet)
+            .await
+            .get("instructions")
+            .is_none());
+
+        let drifted = lazy_handler().await;
+        drifted.set_guidance_probe(Arc::new(FixedProbe(Some("run konnect init"))));
+        let result = initialize_result(&drifted).await;
+        assert_eq!(result["instructions"], "run konnect init");
+        assert_eq!(result["serverInfo"]["name"], "konnect");
     }
 
     /// Claude Code honours list_changed and must not be swept up by a loose

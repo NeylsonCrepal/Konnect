@@ -260,6 +260,9 @@ pub struct ToolContext {
     /// `unavailable` so a caller that does not track the load reports absence
     /// rather than a fabricated `defaults`.
     pub config_resolution: crate::config_resolution::ConfigResolution,
+    /// Reads installed guidance for drift. Set once by the standalone binary,
+    /// which owns the bundle; absent in embedded and test contexts (#728).
+    pub(crate) guidance: std::sync::OnceLock<std::sync::Arc<dyn crate::guidance::GuidanceProbe>>,
 }
 
 impl ToolContext {
@@ -273,6 +276,7 @@ impl ToolContext {
             jlcpcb_cache: QueryCache::default(),
             board_session: board_session::BoardSessionMemory::default(),
             config_resolution: crate::config_resolution::ConfigResolution::unavailable(),
+            guidance: std::sync::OnceLock::new(),
         }
     }
 
@@ -290,6 +294,7 @@ impl ToolContext {
             jlcpcb_cache: QueryCache::default(),
             board_session: board_session::BoardSessionMemory::default(),
             config_resolution: crate::config_resolution::ConfigResolution::unavailable(),
+            guidance: std::sync::OnceLock::new(),
         }
     }
 
