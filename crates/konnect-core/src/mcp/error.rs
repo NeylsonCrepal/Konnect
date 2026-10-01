@@ -134,6 +134,12 @@ pub enum ToolErrorKind {
     /// Eventually each variant above subsumes a subset of these.
     HandlerError { reason: String },
     /// A delivered IPC request has no confirmed outcome. Retrying may duplicate work.
+    IpcBatchRecovered {
+        board_state: String,
+        drop_confirmed: bool,
+        retry_safe: bool,
+        reason: String,
+    },
     IpcOutcomeUnknown {
         board_state: String,
         retry_safe: bool,
@@ -168,6 +174,7 @@ impl ToolErrorKind {
             Self::InvalidConfiguration { .. } => "invalid_configuration",
             Self::HandlerError { .. } => "handler_error",
             Self::IpcOutcomeUnknown { .. } => "ipc_outcome_unknown",
+            Self::IpcBatchRecovered { .. } => "ipc_batch_recovered",
         }
     }
 }

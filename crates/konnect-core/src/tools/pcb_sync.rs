@@ -345,7 +345,7 @@ pub(crate) async fn handle_update_pcb_from_schematic(
             let (creates, updates) = build_mutation_items(&plan, &prepared, &snapshot)?;
             // What we are about to send, so the board can be held to it.
             let expected = footprint_shapes(creates.iter().chain(updates.iter()));
-            client.run_commit("Update PCB from saved schematic", |client| {
+            client.run_commit_recovering_in(snapshot.document.clone(), "Update PCB from saved schematic", |client| {
                 client.create_items_in(snapshot.document.clone(), creates)?;
                 client.update_items_in(snapshot.document.clone(), updates)?;
                 Ok(())
@@ -384,9 +384,10 @@ pub(crate) async fn handle_update_pcb_from_schematic(
         BoardWrite::Refused(result) => {
             // Preserve the structured uncertain outcome instead of claiming
             // the sync was a preflight conflict with no applied changes.
-            if crate::mcp::error::extract_error_kind(&result).as_deref()
-                == Some("ipc_outcome_unknown")
-            {
+            if matches!(
+                crate::mcp::error::extract_error_kind(&result).as_deref(),
+                Some("ipc_outcome_unknown" | "ipc_batch_recovered")
+            ) {
                 return Ok(result);
             }
             let message = result
@@ -3630,6 +3631,22 @@ mod tests {
         let server = crate::tools::pcb_board::board_mock::spawn_kicad_holding_board(
             &board,
             move |command| {
+                if command.type_url.ends_with("SaveDocumentToString") {
+                    let request = kiapi::common::commands::SaveDocumentToString::decode(
+                        command.value.as_slice(),
+                    )
+                    .expect("snapshot request");
+                    return Some(konnect_ipc::builders::pack_any(
+                        &kiapi::common::commands::SavedDocumentResponse {
+                            document: request.document,
+                            contents: include_str!(
+                                "../../tests/fixtures/specctra_two_resistors.kicad_pcb"
+                            )
+                            .into(),
+                        },
+                        "kiapi.common.commands.SavedDocumentResponse",
+                    ));
+                }
                 if command.type_url.ends_with("GetItems") {
                     let request =
                         kiapi::common::commands::GetItems::decode(command.value.as_slice())

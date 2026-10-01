@@ -11,9 +11,24 @@ happened. The structured error reports `board_state: unknown` and
 Inspect the requested board in KiCad and reconcile what was actually applied
 before repeating any mutation. Do not edit the saved file as a workaround:
 it may be older than the live editor state. Keep the full diagnostic, including
-any commit identifier, when reporting the failure. The first #658 safety fix
-does not provide automatic transaction recovery or establish that an undo
-will reverse a pending, unpublished commit.
+any commit identifier, when reporting the failure. Bounded recovery is only
+available for schematic-to-PCB sync when the original operation answers within
+its additional recovery window. An unknown result does not establish that an
+undo will reverse a pending, unpublished commit.
+
+## Schematic sync returned `ipc_batch_recovered`
+
+The apply was aborted after a late IPC reply, not published. Konnect confirmed
+the known commit was dropped and compared a fresh serialized live snapshot
+with the exact target's pre-apply snapshot. This reports `board_state: unchanged`,
+`drop_confirmed: true`, and `retry_safe: false`. Review the live board and run a
+fresh dry run before deciding whether to apply again; do not replay the old
+apply automatically or edit the saved file as a workaround.
+
+Sync allows up to 30 additional seconds after an ordinary 30-second receive
+window. The remaining allowance is shared by rollback and verification, not
+renewed at each step. Missing or late publish replies cannot be rolled back
+automatically; failed verification still reports `ipc_outcome_unknown`.
 
 ## Which Konnect binary is this client using?
 

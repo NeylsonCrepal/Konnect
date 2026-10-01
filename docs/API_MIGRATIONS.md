@@ -20,10 +20,26 @@ operation or publish. The diagnostic includes the known commit identifier, but
 does not claim a successful rollback. Known API refusals retain their existing
 classification and ordinary failed batches still attempt a drop.
 
-This increment does not implement automatic bounded recovery, chunk schematic
-transfers, or prove live one-step undo for chunking. Those remain tracked in
-#658; the issue is not closed by the first safety PR. No general timeout setting
-or new tool is introduced.
+The second increment opts only `update_pcb_from_schematic` into bounded
+late-reply recovery. It captures the serialized live target before beginning
+the transaction. One receive remains alive for the ordinary 30-second window
+plus a 30-second recovery allowance; NNG cancels the request if the receive
+itself times out, so Konnect does not cancel at the ordinary boundary or resend
+the request. A reply arriving after the ordinary window aborts the apply.
+The remaining recovery allowance is shared by exact-target checks, dropping
+the known commit, and observing a fresh serialized snapshot. Confirmed drop
+plus a byte-identical snapshot of the same document returns an **error**, not
+success: `error.kind: ipc_batch_recovered`, `board_state: unchanged`,
+`drop_confirmed: true`, `retry_safe: false`, and `reason`.
+
+No reply, malformed envelope, failed drop, changed target, unequal snapshot,
+or exhausted recovery budget remains `ipc_outcome_unknown`. A late publish
+reply never triggers an automatic drop. Request-timer resends are disabled
+on this scoped client; NNG peer-disconnect retransmission is not an exactly-once
+guarantee. Neither outcome authorizes automatic retry or saved-file fallback.
+Other tools keep their existing timeout. No new tool or timeout setting is
+introduced. Chunking and its live one-step-undo evidence remain tracked in
+#658, which this partial increment does not close.
 
 ## Unreleased: sheet-pin geometry findings
 
