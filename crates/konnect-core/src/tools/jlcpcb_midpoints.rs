@@ -251,7 +251,7 @@ mod tests {
                 let mut response = kiapi::common::commands::GetBoundingBoxResponse::default();
                 for id in requested.items {
                     if mode != "missing-box" {
-                        response.boxes.push(map[&id.value].clone());
+                        response.boxes.push(map[&id.value]);
                         response.items.push(id);
                     }
                 }
