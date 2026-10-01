@@ -780,8 +780,9 @@ fn read_marker(client: InstallClient, paths: &InstallPaths) -> Option<MarkerInfo
 }
 
 /// Classify each hook by the exact command `init` would write for `exe_str`.
-/// A handler for the same hook in the pre-#358 plain-stdout form, or pointing
-/// at another executable, is `different`; nothing else is attributed to us.
+/// A handler for the same hook in the pre-#358 plain-stdout form, or that
+/// form or the current one for another Konnect executable, is `different`;
+/// nothing else is attributed to us.
 fn inspect_hooks(settings_path: &Path, exe_str: &str) -> Vec<HookCheck> {
     // `None` when settings.json exists but cannot be read or parsed.
     let settings = match fs::read_to_string(settings_path) {
@@ -792,16 +793,12 @@ fn inspect_hooks(settings_path: &Path, exe_str: &str) -> Vec<HookCheck> {
     HOOK_SKILLS
         .iter()
         .map(|hook| {
-            let (status, reason) = match &settings {
+            let (status, reason) = match settings
+                .as_ref()
+                .and_then(|settings| event_commands(settings, hook.event))
+            {
                 None => (ItemStatus::Unreadable, None),
-                Some(settings) => classify_hook(
-                    settings["hooks"][hook.event]
-                        .as_array()
-                        .map(|event_arr| handler_commands(event_arr).collect())
-                        .unwrap_or_default(),
-                    exe_str,
-                    hook.name,
-                ),
+                Some(commands) => classify_hook(commands, exe_str, hook.name),
             };
             HookCheck {
                 name: hook.name,
@@ -813,23 +810,94 @@ fn inspect_hooks(settings_path: &Path, exe_str: &str) -> Vec<HookCheck> {
         .collect()
 }
 
+/// The handler commands under one event, or `None` when settings.json is
+/// valid JSON of the wrong shape. Malformed evidence is not an empty event.
+fn event_commands<'a>(settings: &'a serde_json::Value, event: &str) -> Option<Vec<&'a str>> {
+    let hooks = match settings.as_object()?.get("hooks") {
+        None => return Some(Vec::new()),
+        Some(hooks) => hooks.as_object()?,
+    };
+    let entries = match hooks.get(event) {
+        None => return Some(Vec::new()),
+        Some(entries) => entries.as_array()?,
+    };
+    let mut commands = Vec::new();
+    for entry in entries {
+        let Some(handlers) = entry.as_object()?.get("hooks") else {
+            continue;
+        };
+        for handler in handlers.as_array()? {
+            if let Some(command) = handler.as_object()?.get("command") {
+                commands.push(command.as_str()?);
+            }
+        }
+    }
+    Some(commands)
+}
+
 fn classify_hook(
     commands: Vec<&str>,
     exe_str: &str,
     hook_name: &str,
 ) -> (ItemStatus, Option<&'static str>) {
     let current = hook_command(exe_str, "hook", hook_name);
-    let tail = hook_command_tail("hook", hook_name);
-    let legacy_tail = legacy_hook_command_tail(hook_name);
     if commands.contains(&current.as_str()) {
         (ItemStatus::Current, None)
-    } else if commands.iter().any(|c| c.ends_with(&legacy_tail)) {
+    } else if commands.iter().any(|c| {
+        *c == legacy_hook_command(exe_str, hook_name) || is_legacy_konnect_hook(c, hook_name)
+    }) {
         (ItemStatus::Different, Some("legacy_handler"))
-    } else if commands.iter().any(|c| c.ends_with(&tail)) {
+    } else if commands.iter().any(|c| is_konnect_hook(c, hook_name)) {
         (ItemStatus::Different, Some("other_executable"))
     } else {
         (ItemStatus::Missing, None)
     }
+}
+
+/// `command` is exactly what `init` writes for some Konnect executable: one
+/// quoted argument naming a `konnect` binary, then `hook '<name>'`.
+fn is_konnect_hook(command: &str, hook_name: &str) -> bool {
+    let Some(quoted) = command.strip_suffix(&hook_command_tail("hook", hook_name)) else {
+        return false;
+    };
+    unquote_command_arg(quoted).is_some_and(|exe| {
+        is_konnect_executable(&exe) && hook_command(&exe, "hook", hook_name) == command
+    })
+}
+
+/// `command` is exactly the pre-#358 form for another Konnect executable.
+/// That form was unquoted, so a path with whitespace cannot be told from
+/// other arguments; only this binary's own legacy command may contain one.
+fn is_legacy_konnect_hook(command: &str, hook_name: &str) -> bool {
+    let Some(written) = command.strip_suffix(&legacy_hook_command_tail(hook_name)) else {
+        return false;
+    };
+    let exe = written.replace("\\\\", "\\");
+    !written.is_empty()
+        && !written.contains(char::is_whitespace)
+        && is_konnect_executable(&exe)
+        && legacy_hook_command(&exe, hook_name) == command
+}
+
+/// The inverse of [`quote_command_arg`], or `None` when `quoted` is not a
+/// single argument in exactly that form.
+fn unquote_command_arg(quoted: &str) -> Option<String> {
+    #[cfg(windows)]
+    let argument = quoted
+        .strip_prefix('"')?
+        .strip_suffix('"')?
+        .replace("\\\"", "\"");
+    #[cfg(not(windows))]
+    let argument = quoted
+        .strip_prefix('\'')?
+        .strip_suffix('\'')?
+        .replace("'\\''", "'");
+    (quote_command_arg(&argument) == quoted).then_some(argument)
+}
+
+fn is_konnect_executable(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name == "konnect" || name.eq_ignore_ascii_case("konnect.exe")
 }
 
 /// Serves drift for both clients to `get_installation_info` and `initialize`.
@@ -1612,6 +1680,104 @@ mod tests {
         .unwrap();
         for hook in inspect_hooks(&settings, "/usr/bin/konnect") {
             assert_eq!(hook.status, ItemStatus::Missing, "{}", hook.name);
+        }
+    }
+
+    /// Only the exact command `init` writes, for this or another `konnect`
+    /// binary, is ours. A command that ends in the same arguments is not.
+    #[test]
+    fn a_command_ending_in_a_hook_tail_is_not_attributed() {
+        let temp = TempDir::new().unwrap();
+        let settings = temp.path().join("settings.json");
+        let handlers = |commands: &[String]| {
+            let handlers = commands
+                .iter()
+                .map(|command| serde_json::json!({"type": "command", "command": command}))
+                .collect::<Vec<_>>();
+            serde_json::json!({"hooks": {"PreToolUse": [{"hooks": handlers}]}}).to_string()
+        };
+        let spoofed = [
+            format!("echo{}", hook_command_tail("hook", "pre-pcb-ipc")),
+            hook_command("/usr/bin/echo", "hook", "pre-pcb-ipc"),
+            format!(
+                "{} --verbose{}",
+                quote_command_arg("/opt/old/konnect"),
+                hook_command_tail("hook", "pre-pcb-ipc")
+            ),
+            format!(
+                "echo /opt/old/konnect{}",
+                legacy_hook_command_tail("pre-pcb-fallback")
+            ),
+            legacy_hook_command("/usr/bin/echo", "pre-pcb-fallback"),
+        ];
+        for command in &spoofed {
+            fs::write(&settings, handlers(std::slice::from_ref(command))).unwrap();
+            for hook in inspect_hooks(&settings, "/usr/bin/konnect") {
+                assert_eq!(hook.status, ItemStatus::Missing, "{command}: {}", hook.name);
+            }
+        }
+
+        fs::write(
+            &settings,
+            handlers(&[
+                hook_command("/opt/old/konnect", "hook", "pre-pcb-ipc"),
+                hook_command("C:\\Konnect\\konnect.exe", "hook", "pre-pcb-fallback"),
+                legacy_hook_command("/opt/old/konnect", "pre-pcb-closed"),
+                legacy_hook_command("C:\\Konnect\\konnect.exe", "pre-pcb-conditional"),
+            ]),
+        )
+        .unwrap();
+        let hooks = inspect_hooks(&settings, "/usr/bin/konnect")
+            .into_iter()
+            .map(|hook| (hook.name, hook.status.as_str(), hook.reason))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            hooks,
+            [
+                ("pre-pcb-ipc", "different", Some("other_executable")),
+                ("pre-pcb-fallback", "different", Some("other_executable")),
+                ("pre-pcb-closed", "different", Some("legacy_handler")),
+                ("pre-pcb-conditional", "different", Some("legacy_handler")),
+            ]
+        );
+    }
+
+    /// Valid JSON of the wrong shape is malformed evidence, not an absent
+    /// hook, so it reads `unreadable` rather than `missing`.
+    #[test]
+    fn settings_of_the_wrong_shape_are_unreadable() {
+        let temp = TempDir::new().unwrap();
+        let settings = temp.path().join("settings.json");
+        for malformed in [
+            r#"[]"#,
+            r#"{"hooks": []}"#,
+            r#"{"hooks": {"PreToolUse": "not-an-array"}}"#,
+            r#"{"hooks": {"PreToolUse": ["not-an-object"]}}"#,
+            r#"{"hooks": {"PreToolUse": [{"hooks": {}}]}}"#,
+            r#"{"hooks": {"PreToolUse": [{"hooks": [42]}]}}"#,
+            r#"{"hooks": {"PreToolUse": [{"hooks": [{"command": 42}]}]}}"#,
+        ] {
+            fs::write(&settings, malformed).unwrap();
+            for hook in inspect_hooks(&settings, "/usr/bin/konnect") {
+                assert_eq!(
+                    hook.status,
+                    ItemStatus::Unreadable,
+                    "{malformed}: {}",
+                    hook.name
+                );
+            }
+        }
+        // Absent events, and handlers without a command, are valid and empty.
+        for valid in [
+            r#"{}"#,
+            r#"{"hooks": {}}"#,
+            r#"{"hooks": {"PostToolUse": []}}"#,
+            r#"{"hooks": {"PreToolUse": [{"matcher": "x"}, {"hooks": [{"type": "prompt"}]}]}}"#,
+        ] {
+            fs::write(&settings, valid).unwrap();
+            for hook in inspect_hooks(&settings, "/usr/bin/konnect") {
+                assert_eq!(hook.status, ItemStatus::Missing, "{valid}: {}", hook.name);
+            }
         }
     }
 

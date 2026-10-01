@@ -82,11 +82,11 @@ client uses. Each file and hook is compared with that binary's bundle:
 | `current` | Byte-identical to the bundle, or the exact hook command `init` writes |
 | `different` | Present, but not identical. It may be an older release's copy or your own edit; the install marker records only a version, so the two cannot be told apart |
 | `missing` | Not present |
-| `unreadable` | Present but could not be read, or `settings.json` is not valid JSON |
+| `unreadable` | Present but could not be read, or `settings.json` is not valid JSON or not the shape Claude expects |
 
 A `different` hook carries a reason: `legacy_handler` is the pre-hook-JSON
 `… skill <name>` form, which Claude ignores, and `other_executable` is a hook
-that runs another Konnect binary.
+that runs another Konnect binary, written exactly as `konnect init` writes it.
 
 The serving process makes the same comparison for both clients once per
 installed guidance version, meaning each install marker. The first start
