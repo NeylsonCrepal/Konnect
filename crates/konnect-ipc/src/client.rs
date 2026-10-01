@@ -899,6 +899,8 @@ pub enum IpcFailure {
     /// A delivered request has no confirmed outcome. Never retry a mutation
     /// or fall back to a file write on this evidence.
     Uncertain(String),
+    /// A timed-out batch was dropped and its exact live snapshot restored.
+    Recovered(String),
     Target {
         error: BoardTargetError,
         message: String,
@@ -913,6 +915,8 @@ impl IpcFailure {
         let message = format!("{error:#}");
         if error.downcast_ref::<IpcOutcomeUnknown>().is_some() {
             IpcFailure::Uncertain(message)
+        } else if error.downcast_ref::<IpcBatchRecovered>().is_some() {
+            IpcFailure::Recovered(message)
         } else if let Some(target) = error
             .chain()
             .find_map(|cause| cause.downcast_ref::<BoardTargetError>().cloned())
@@ -933,6 +937,7 @@ impl IpcFailure {
             IpcFailure::Unreachable(message)
             | IpcFailure::Rejected(message)
             | IpcFailure::Uncertain(message)
+            | IpcFailure::Recovered(message)
             | IpcFailure::Target { message, .. } => message,
         }
     }
@@ -953,6 +958,38 @@ impl std::fmt::Display for IpcOutcomeUnknown {
 
 impl std::error::Error for IpcOutcomeUnknown {}
 
+#[derive(Debug)]
+pub struct IpcBatchRecovered {
+    pub commit_id: String,
+}
+
+impl std::fmt::Display for IpcBatchRecovered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "KiCad batch {} aborted after a late reply; rollback confirmed and exact live snapshot restored", self.commit_id)
+    }
+}
+
+impl std::error::Error for IpcBatchRecovered {}
+
+#[derive(Debug)]
+struct LateReply;
+
+impl std::fmt::Display for LateReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("KiCad answered after the operation timeout")
+    }
+}
+
+impl std::error::Error for LateReply {}
+
+struct RecoveryWindow {
+    document: kiapi::common::types::DocumentSpecifier,
+    contents: String,
+    receive_timeout: std::time::Duration,
+    budget: std::time::Duration,
+    deadline: Option<std::time::Instant>,
+}
+
 impl std::fmt::Display for IpcFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}", self.message())
@@ -964,6 +1001,7 @@ pub struct KiCadIpcClient {
     kicad_token: String,
     client_name: String,
     bound_board: std::sync::Mutex<Option<BoundBoardTarget>>,
+    recovery: Option<std::sync::Mutex<RecoveryWindow>>,
 }
 
 #[derive(Clone)]
@@ -993,6 +1031,7 @@ impl KiCadIpcClient {
             kicad_token: std::env::var("KICAD_API_TOKEN").unwrap_or_default(),
             client_name: format!("konnect-{}", std::process::id()),
             bound_board: std::sync::Mutex::new(None),
+            recovery: None,
         }
     }
 
@@ -1068,8 +1107,29 @@ impl KiCadIpcClient {
         // The receive bound is the caller's, so a caller on a deadline gets
         // its own answer back by then rather than this command's default.
         use nng::options::Options;
+        let recovery_remaining = self.recovery_remaining()?;
+        let recv_timeout = if let Some(window) = &self.recovery {
+            let window = window
+                .lock()
+                .map_err(|_| anyhow::anyhow!("recovery lock poisoned"))?;
+            recovery_remaining
+                .unwrap_or(window.receive_timeout)
+                .min(recv_timeout)
+        } else {
+            recv_timeout
+        };
+        // Do not let the request timer retransmit a mutation while waiting
+        // for its original reply. Peer-disconnect resends are an NNG protocol
+        // limitation, so uncertainty still never authorizes automatic retry.
+        if self.recovery.is_some() {
+            socket.set_opt::<nng::options::protocol::reqrep::ResendTime>(None)?;
+        }
         socket
-            .set_opt::<nng::options::SendTimeout>(Some(COMMAND_SEND_TIMEOUT))
+            .set_opt::<nng::options::SendTimeout>(Some(
+                recovery_remaining
+                    .unwrap_or(COMMAND_SEND_TIMEOUT)
+                    .min(COMMAND_SEND_TIMEOUT),
+            ))
             .context("Failed to set NNG send timeout")?;
         socket
             .set_opt::<nng::options::RecvTimeout>(Some(recv_timeout))
@@ -1087,7 +1147,12 @@ impl KiCadIpcClient {
         };
 
         let diagnostic_dial_url = crate::redact_endpoint(&dial_url);
-        socket.dial(&dial_url).map_err(|error| {
+        let dial = if recovery_remaining.is_some() {
+            socket.dial_async(&dial_url)
+        } else {
+            socket.dial(&dial_url)
+        };
+        dial.map_err(|error| {
             let reason = UnreachableReason::from_dial_error(error);
             unreachable_error(
                 reason,
@@ -1108,13 +1173,52 @@ impl KiCadIpcClient {
             )
         })?;
 
-        // Receive response
+        // NNG cancels a req0 request when recv times out; a second recv would
+        // be IncorrectState. Keep ONE receive alive through both windows and
+        // judge lateness by arrival time, without sending the request again.
+        let receive_started = std::time::Instant::now();
+        let receive_config = (|| -> Result<()> {
+            let timeout = if let Some(remaining) = self.recovery_remaining()? {
+                remaining
+            } else if let Some(window) = &self.recovery {
+                recv_timeout
+                    + window
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("recovery lock poisoned"))?
+                        .budget
+            } else {
+                recv_timeout
+            };
+            socket.set_opt::<nng::options::RecvTimeout>(Some(timeout))?;
+            Ok(())
+        })();
+        receive_config.map_err(|error| {
+            error.context(IpcOutcomeUnknown {
+                command: type_name.into(),
+                reason: "receive configuration failed after send".into(),
+            })
+        })?;
         let reply = socket.recv().map_err(|e| {
             anyhow::Error::new(IpcOutcomeUnknown {
                 command: type_name.to_string(),
                 reason: format!("NNG recv failed after send: {e}"),
             })
         })?;
+        let late = self.recovery.is_some()
+            && recovery_remaining.is_none()
+            && receive_started.elapsed() >= recv_timeout;
+        if late {
+            let mut window = self
+                .recovery
+                .as_ref()
+                .expect("checked recovery")
+                .lock()
+                .map_err(|_| IpcOutcomeUnknown {
+                    command: type_name.into(),
+                    reason: "recovery lock poisoned after late reply".into(),
+                })?;
+            window.deadline = Some(receive_started + recv_timeout + window.budget);
+        }
 
         let response = kiapi::common::ApiResponse::decode(reply.as_slice()).map_err(|error| {
             anyhow::Error::new(IpcOutcomeUnknown {
@@ -1128,7 +1232,24 @@ impl KiCadIpcClient {
             command: type_name.to_string(),
             reason: "KiCad IPC response is missing its status".to_string(),
         })?;
-        let code = status.status();
+        let code = kiapi::common::ApiStatusCode::try_from(status.status).map_err(|_| {
+            IpcOutcomeUnknown {
+                command: type_name.to_string(),
+                reason: "unknown response status code".into(),
+            }
+        })?;
+        if late {
+            // BeginCommit has no known id yet; EndCommit may have published.
+            // Neither may be followed by a blind drop.
+            if type_name.ends_with("BeginCommit") || type_name.ends_with("EndCommit") {
+                return Err(anyhow::Error::new(IpcOutcomeUnknown {
+                    command: type_name.to_string(),
+                    reason: "late transaction-boundary reply; no automatic rollback attempted"
+                        .into(),
+                }));
+            }
+            return Err(anyhow::Error::new(LateReply));
+        }
         if code != kiapi::common::ApiStatusCode::AsOk {
             let msg = if status.error_message.is_empty() {
                 format!("{:?}", code)
@@ -1148,6 +1269,125 @@ impl KiCadIpcClient {
     }
 
     // ─── Public API (same interface as before, tools don't change) ───────
+
+    fn recovery_remaining(&self) -> Result<Option<std::time::Duration>> {
+        let Some(window) = &self.recovery else {
+            return Ok(None);
+        };
+        let window = window
+            .lock()
+            .map_err(|_| anyhow::anyhow!("recovery lock poisoned"))?;
+        let Some(deadline) = window.deadline else {
+            return Ok(None);
+        };
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow::Error::new(IpcOutcomeUnknown {
+                command: "batch recovery".into(),
+                reason: "shared recovery deadline exhausted".into(),
+            }));
+        }
+        Ok(Some(remaining))
+    }
+
+    /// Opt one exact-board batch into bounded late-reply recovery. Ordinary
+    /// calls and other clients keep their existing timeout behavior.
+    pub fn run_commit_recovering_in<T>(
+        &self,
+        document: kiapi::common::types::DocumentSpecifier,
+        description: &str,
+        operation: impl FnOnce(&Self) -> Result<T>,
+    ) -> Result<T> {
+        self.run_commit_recovering_with_limits(
+            document,
+            description,
+            operation,
+            COMMAND_RECV_TIMEOUT,
+            std::time::Duration::from_secs(30),
+        )
+    }
+
+    fn run_commit_recovering_with_limits<T>(
+        &self,
+        document: kiapi::common::types::DocumentSpecifier,
+        description: &str,
+        operation: impl FnOnce(&Self) -> Result<T>,
+        receive_timeout: std::time::Duration,
+        budget: std::time::Duration,
+    ) -> Result<T> {
+        anyhow::ensure!(
+            self.get_board_document()? == document,
+            "recovery target changed before batch"
+        );
+        let contents = self.recovery_snapshot_in(document.clone())?;
+        let scoped = Self {
+            socket_path: self.socket_path.clone(),
+            kicad_token: self.kicad_token.clone(),
+            client_name: self.client_name.clone(),
+            bound_board: std::sync::Mutex::new(
+                self.bound_board
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("bound board lock poisoned"))?
+                    .clone(),
+            ),
+            recovery: Some(std::sync::Mutex::new(RecoveryWindow {
+                document,
+                contents,
+                receive_timeout,
+                budget,
+                deadline: None,
+            })),
+        };
+        scoped.run_commit(description, operation)
+    }
+
+    fn recover_late_batch(&self, commit_id: &str) -> Result<()> {
+        let window = self.recovery.as_ref().context("no batch recovery window")?;
+        let (document, contents) = {
+            let window = window
+                .lock()
+                .map_err(|_| anyhow::anyhow!("recovery lock poisoned"))?;
+            (window.document.clone(), window.contents.clone())
+        };
+        self.recovery_remaining()?;
+        anyhow::ensure!(
+            self.get_board_document()? == document,
+            "recovery target changed before drop"
+        );
+        self.drop_commit(commit_id)?;
+        anyhow::ensure!(
+            self.get_board_document()? == document,
+            "recovery target changed after drop"
+        );
+        let observed = self.recovery_snapshot_in(document)?;
+        self.recovery_remaining()?;
+        anyhow::ensure!(observed == contents, "live snapshot differs after rollback");
+        Ok(())
+    }
+
+    fn recovery_snapshot_in(
+        &self,
+        document: kiapi::common::types::DocumentSpecifier,
+    ) -> Result<String> {
+        let response = unpack_required::<kiapi::common::commands::SavedDocumentResponse>(
+            self.send_command(
+                &kiapi::common::commands::SaveDocumentToString {
+                    document: Some(document.clone()),
+                },
+                "kiapi.common.commands.SaveDocumentToString",
+            )?,
+            "SaveDocumentToString",
+        )?;
+        anyhow::ensure!(
+            response.document.as_ref() == Some(&document),
+            "snapshot response names a different or missing document"
+        );
+        anyhow::ensure!(
+            !response.contents.is_empty(),
+            "KiCad returned an empty recovery snapshot"
+        );
+        Ok(response.contents)
+    }
 
     /// Check if KiCAD is reachable.
     pub fn ping(&self) -> Result<bool> {
@@ -2271,6 +2511,15 @@ impl KiCadIpcClient {
                 Ok(value)
             }
             Ok(Err(operation_error)) => {
+                if operation_error.downcast_ref::<LateReply>().is_some() {
+                    return match self.recover_late_batch(&commit_id) {
+                        Ok(()) => Err(anyhow::Error::new(IpcBatchRecovered { commit_id })),
+                        Err(recovery_error) => Err(operation_error.context(IpcOutcomeUnknown {
+                            command: "batch recovery".into(),
+                            reason: format!("commit {commit_id}: recovery could not be confirmed ({recovery_error:#})"),
+                        })),
+                    };
+                }
                 if operation_error
                     .downcast_ref::<IpcOutcomeUnknown>()
                     .is_some()
@@ -4974,6 +5223,349 @@ fn lexically_normalized(path: &Path) -> PathBuf {
 fn first_duplicate<'a>(paths: &[&'a PathBuf]) -> Option<&'a PathBuf> {
     let mut seen = std::collections::HashSet::new();
     paths.iter().copied().find(|path| !seen.insert(*path))
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use nng::options::Options;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Scenario {
+        Success,
+        Late,
+        Exhausted,
+        DropFailed,
+        Changed,
+        TargetChanged,
+        Malformed,
+        PublishLate,
+        CleanupSlow,
+        WrongSnapshot,
+        ObserveFailed,
+        BeginLate,
+    }
+
+    fn exercise(scenario: Scenario) -> (Result<()>, Vec<String>, Duration) {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let address = format!(
+            "inproc://bounded-recovery-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let server = nng::Socket::new(nng::Protocol::Rep0).unwrap();
+        server.listen(&address).unwrap();
+        let control = server.clone();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let observed = calls.clone();
+        let document = kiapi::common::types::DocumentSpecifier {
+            r#type: kiapi::common::types::DocumentType::DoctypePcb as i32,
+            project: Some(kiapi::common::types::ProjectSpecifier {
+                name: "test".into(),
+                path: "C:/design".into(),
+            }),
+            identifier: Some(
+                kiapi::common::types::document_specifier::Identifier::BoardFilename(
+                    "test.kicad_pcb".into(),
+                ),
+            ),
+        };
+        let target = document.clone();
+        let worker = std::thread::spawn(move || {
+            let mut mutated = false;
+            let mut dropped = false;
+            while let Ok(request) = server.recv() {
+                let request = kiapi::common::ApiRequest::decode(request.as_slice()).unwrap();
+                let message = request.message.unwrap();
+                let name = message.type_url.rsplit('.').next().unwrap().to_string();
+                observed.lock().unwrap().push(name.clone());
+                let mut response = kiapi::common::ApiResponse {
+                    status: Some(kiapi::common::ApiResponseStatus {
+                        status: kiapi::common::ApiStatusCode::AsOk as i32,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                match name.as_str() {
+                    "GetOpenDocuments" => {
+                        let mut doc = target.clone();
+                        if mutated && matches!(scenario, Scenario::TargetChanged) {
+                            doc.identifier = Some(
+                                kiapi::common::types::document_specifier::Identifier::BoardFilename(
+                                    "other.kicad_pcb".into(),
+                                ),
+                            );
+                        }
+                        response.message = Some(pack_any(
+                            &kiapi::common::commands::GetOpenDocumentsResponse {
+                                documents: vec![doc],
+                            },
+                            "kiapi.common.commands.GetOpenDocumentsResponse",
+                        ));
+                    }
+                    "SaveDocumentToString" => {
+                        let command = kiapi::common::commands::SaveDocumentToString::decode(
+                            message.value.as_slice(),
+                        )
+                        .unwrap();
+                        assert_eq!(command.document, Some(target.clone()));
+                        let fixture = include_str!(
+                            "../../konnect-sexp/tests/fixtures/gr_poly_outline.kicad_pcb"
+                        );
+                        let contents =
+                            if mutated && (!dropped || matches!(scenario, Scenario::Changed)) {
+                                format!("{fixture}\n; changed")
+                            } else {
+                                fixture.into()
+                            };
+                        if mutated && matches!(scenario, Scenario::ObserveFailed) {
+                            response.status = None;
+                        }
+                        response.message = Some(pack_any(
+                            &kiapi::common::commands::SavedDocumentResponse {
+                                document: if mutated && matches!(scenario, Scenario::WrongSnapshot)
+                                {
+                                    None
+                                } else {
+                                    Some(target.clone())
+                                },
+                                contents,
+                            },
+                            "kiapi.common.commands.SavedDocumentResponse",
+                        ));
+                    }
+                    "BeginCommit" => {
+                        if matches!(scenario, Scenario::BeginLate) {
+                            std::thread::sleep(Duration::from_millis(140));
+                        }
+                        response.message = Some(pack_any(
+                            &kiapi::common::commands::BeginCommitResponse {
+                                id: Some(kiapi::common::types::Kiid {
+                                    value: "known-commit".into(),
+                                }),
+                            },
+                            "kiapi.common.commands.BeginCommitResponse",
+                        ))
+                    }
+                    "Ping" => {
+                        mutated = true;
+                        if !matches!(scenario, Scenario::Success | Scenario::PublishLate) {
+                            std::thread::sleep(if matches!(scenario, Scenario::Exhausted) {
+                                Duration::from_millis(800)
+                            } else {
+                                Duration::from_millis(140)
+                            });
+                        }
+                        if matches!(scenario, Scenario::Malformed) {
+                            response.status = None;
+                        }
+                    }
+                    "EndCommit" => {
+                        let command =
+                            kiapi::common::commands::EndCommit::decode(message.value.as_slice())
+                                .unwrap();
+                        assert_eq!(command.id.unwrap().value, "known-commit");
+                        observed
+                            .lock()
+                            .unwrap()
+                            .push(format!("action:{}", command.action));
+                        if matches!(scenario, Scenario::PublishLate) {
+                            std::thread::sleep(Duration::from_millis(140));
+                        }
+                        if matches!(scenario, Scenario::CleanupSlow) {
+                            std::thread::sleep(Duration::from_millis(480));
+                        }
+                        if matches!(scenario, Scenario::DropFailed) {
+                            response.status.as_mut().unwrap().status =
+                                kiapi::common::ApiStatusCode::AsBadRequest as i32;
+                        } else if command.action
+                            == kiapi::common::commands::CommitAction::CmaDrop as i32
+                        {
+                            dropped = true;
+                        }
+                        response.message = Some(pack_any(
+                            &kiapi::common::commands::EndCommitResponse {},
+                            "kiapi.common.commands.EndCommitResponse",
+                        ));
+                    }
+                    other => panic!("unexpected {other}"),
+                }
+                if server.send(response.encode_to_vec().as_slice()).is_err() {
+                    break;
+                }
+            }
+        });
+        let started = Instant::now();
+        let result = KiCadIpcClient::new(address).run_commit_recovering_with_limits(
+            document,
+            "test",
+            |client| {
+                client.send_command(
+                    &kiapi::common::commands::Ping {},
+                    "kiapi.common.commands.Ping",
+                )?;
+                Ok(())
+            },
+            Duration::from_millis(60),
+            Duration::from_millis(400),
+        );
+        let elapsed = started.elapsed();
+        control.close();
+        worker.join().unwrap();
+        let calls = calls.lock().unwrap().clone();
+        (result, calls, elapsed)
+    }
+
+    #[test]
+    fn bounded_recovery_success_and_late_abort() {
+        let (result, calls, _) = exercise(Scenario::Success);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(calls.iter().filter(|s| s.starts_with("action:")).count(), 1);
+        assert!(calls.contains(&format!(
+            "action:{}",
+            kiapi::common::commands::CommitAction::CmaCommit as i32
+        )));
+        let (result, calls, _) = exercise(Scenario::Late);
+        let failure = IpcFailure::from_error(result.unwrap_err());
+        assert!(
+            matches!(failure, IpcFailure::Recovered(_)),
+            "{failure:?}; {calls:?}"
+        );
+        assert_eq!(calls.iter().filter(|s| *s == "Ping").count(), 1);
+        assert!(calls.contains(&format!(
+            "action:{}",
+            kiapi::common::commands::CommitAction::CmaDrop as i32
+        )));
+        assert!(!calls.contains(&format!(
+            "action:{}",
+            kiapi::common::commands::CommitAction::CmaCommit as i32
+        )));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|s| *s == "SaveDocumentToString")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn bounded_recovery_never_claims_unproven_rollback() {
+        for scenario in [
+            Scenario::Exhausted,
+            Scenario::DropFailed,
+            Scenario::Changed,
+            Scenario::TargetChanged,
+            Scenario::Malformed,
+            Scenario::PublishLate,
+            Scenario::CleanupSlow,
+            Scenario::WrongSnapshot,
+            Scenario::ObserveFailed,
+            Scenario::BeginLate,
+        ] {
+            let (result, calls, elapsed) = exercise(scenario);
+            let failure = IpcFailure::from_error(result.unwrap_err());
+            assert!(matches!(failure, IpcFailure::Uncertain(_)), "{failure:?}");
+            assert!(
+                elapsed < Duration::from_millis(650),
+                "shared budget exceeded: {elapsed:?}"
+            );
+            if matches!(
+                scenario,
+                Scenario::Exhausted
+                    | Scenario::TargetChanged
+                    | Scenario::Malformed
+                    | Scenario::BeginLate
+            ) {
+                assert!(!calls.iter().any(|s| s == "EndCommit"));
+            }
+            if matches!(scenario, Scenario::PublishLate) {
+                assert!(!calls.contains(&format!(
+                    "action:{}",
+                    kiapi::common::commands::CommitAction::CmaDrop as i32
+                )));
+            }
+        }
+    }
+
+    /// The proxy forwards an actual mutation to KiCad, then withholds ONLY
+    /// that reply. The rollback must restore actual serialized live state.
+    #[test]
+    #[ignore = "requires KONNECT_LIVE_RECOVERY_BOARD (disposable open PCB) and enabled KiCad API"]
+    fn bounded_recovery_live_delayed_create_restores_snapshot() {
+        let board = PathBuf::from(
+            std::env::var("KONNECT_LIVE_RECOVERY_BOARD").expect("disposable board path required"),
+        );
+        let real_address = std::env::var("KICAD_API_SOCKET")
+            .ok()
+            .or_else(crate::socket::detect_ipc_address)
+            .expect("KiCad IPC address required");
+        let server = nng::Socket::new(nng::Protocol::Rep0).unwrap();
+        let address = format!("inproc://live-recovery-{}", std::process::id());
+        server.listen(&address).unwrap();
+        let control = server.clone();
+        let worker = std::thread::spawn(move || {
+            while let Ok(request) = server.recv() {
+                let envelope = kiapi::common::ApiRequest::decode(request.as_slice()).unwrap();
+                let mutation = envelope
+                    .message
+                    .as_ref()
+                    .is_some_and(|m| m.type_url.ends_with("CreateItems"));
+                let upstream = nng::Socket::new(nng::Protocol::Req0).unwrap();
+                upstream
+                    .set_opt::<nng::options::RecvTimeout>(Some(Duration::from_secs(5)))
+                    .unwrap();
+                upstream
+                    .set_opt::<nng::options::SendTimeout>(Some(Duration::from_secs(5)))
+                    .unwrap();
+                upstream.dial(&real_address).unwrap();
+                upstream.send(request.as_slice()).unwrap();
+                let response = upstream.recv().unwrap();
+                if mutation {
+                    std::thread::sleep(Duration::from_millis(700));
+                }
+                if server.send(response.as_slice()).is_err() {
+                    break;
+                }
+            }
+        });
+        let client = KiCadIpcClient::new(address);
+        let outcome = (|| -> Result<()> {
+            let document = client.find_open_board(&board)?;
+            let before = client.recovery_snapshot_in(document.clone())?;
+            let track = crate::builders::build_track("", 0, "F.Cu", 0.25, 5.0, 5.0, 6.0, 5.0);
+            let result = client.run_commit_recovering_with_limits(
+                document.clone(),
+                "recovery regression",
+                |client| {
+                    client.create_items_in(
+                        document.clone(),
+                        vec![pack_any(&track, "kiapi.board.types.Track")],
+                    )?;
+                    Ok(())
+                },
+                Duration::from_millis(500),
+                Duration::from_secs(5),
+            );
+            let error = match result {
+                Err(error) => error,
+                Ok(()) => anyhow::bail!("the proxy's late response did not abort the batch"),
+            };
+            anyhow::ensure!(
+                error.downcast_ref::<IpcBatchRecovered>().is_some(),
+                "{error:#}"
+            );
+            anyhow::ensure!(
+                client.recovery_snapshot_in(document)? == before,
+                "live board was not restored"
+            );
+            Ok(())
+        })();
+        control.close();
+        worker.join().unwrap();
+        outcome.unwrap();
+    }
 }
 
 #[cfg(test)]

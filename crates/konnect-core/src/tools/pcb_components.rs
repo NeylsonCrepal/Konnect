@@ -45,6 +45,9 @@ macro_rules! ipc {
                 return Ok(crate::tools::ipc_target_error_result(&error))
             }
             Err(konnect_ipc::IpcFailure::Rejected(msg)) => return Ok(CallToolResult::error(msg)),
+            Err(konnect_ipc::IpcFailure::Recovered(msg)) => {
+                return Ok(crate::tools::ipc_recovered_result(&msg))
+            }
             Err(konnect_ipc::IpcFailure::Uncertain(msg)) => {
                 return Ok(crate::tools::ipc_uncertain_result(&msg))
             }
@@ -3461,6 +3464,9 @@ async fn handle_get_component_pads(
         }
         Err(konnect_ipc::IpcFailure::Rejected(message)) => {
             return Ok(CallToolResult::error(message));
+        }
+        Err(konnect_ipc::IpcFailure::Recovered(message)) => {
+            return Ok(crate::tools::ipc_recovered_result(&message));
         }
         Err(konnect_ipc::IpcFailure::Uncertain(message)) => {
             return Ok(crate::tools::ipc_uncertain_result(&message));

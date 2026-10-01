@@ -535,6 +535,16 @@ where
 }
 
 /// Unknown is not a rejection or evidence of no mutation. Never advise a blind retry.
+pub(crate) fn ipc_recovered_result(message: &str) -> CallToolResult {
+    CallToolResult::error_kind(
+        crate::mcp::error::ToolErrorKind::IpcBatchRecovered {
+            board_state: "unchanged".into(), drop_confirmed: true,
+            retry_safe: false, reason: message.into(),
+        },
+        format!("{message}. The apply was aborted, not published. Run a fresh dry run before deciding whether to apply again; no automatic retry or file fallback was attempted."),
+    )
+}
+
 pub(crate) fn ipc_uncertain_result(message: &str) -> CallToolResult {
     CallToolResult::error_kind(
         crate::mcp::error::ToolErrorKind::IpcOutcomeUnknown {

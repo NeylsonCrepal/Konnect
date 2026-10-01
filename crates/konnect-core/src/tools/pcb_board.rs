@@ -282,6 +282,9 @@ where
     Ok(
         match live_board::observe(ctx, board_path, move |client, _| f(client)).await? {
             LiveBoard::Answered(value) => BoardWrite::Ipc(value),
+            LiveBoard::Recovered(message) => {
+                BoardWrite::Refused(crate::tools::ipc_recovered_result(&message))
+            }
             LiveBoard::Uncertain(message) => {
                 BoardWrite::Refused(crate::tools::ipc_uncertain_result(&message))
             }
@@ -423,6 +426,7 @@ pub(crate) async fn refuse_if_board_open_in_kicad(
             // it permits, and that disagreement is #577's to settle.
             LiveBoard::Rejected(_) | LiveBoard::Unserved { .. } | LiveBoard::NotOpen { .. } => None,
             LiveBoard::Uncertain(message) => Some(crate::tools::ipc_uncertain_result(&message)),
+            LiveBoard::Recovered(message) => Some(crate::tools::ipc_recovered_result(&message)),
             LiveBoard::Unresolved(error) => Some(crate::tools::ipc_target_error_result(&error)),
             LiveBoard::NeverReached(_) => board_lock_refusal(board_path),
             LiveBoard::LostAfterObservation {
@@ -3571,6 +3575,34 @@ mod board_session_safety_tests {
 
         assert!(matches!(result, Err(konnect_ipc::IpcFailure::Rejected(_))));
         assert!(!ctx.board_session.was_observed_live(&board));
+    }
+
+    #[tokio::test]
+    async fn recovered_write_preserves_abort_evidence_and_never_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let board = super::mounting_hole_tests::blank_board(dir.path());
+        let before = std::fs::read(&board).unwrap();
+        let server = spawn_one_document_response(&board);
+        let ctx = ctx_talking_to(server.address().to_string());
+        let answer = attempt_ipc_write::<(), _>(&ctx, &board, "sync apply", |_| {
+            Err(anyhow::Error::new(konnect_ipc::client::IpcBatchRecovered {
+                commit_id: "observed-id".into(),
+            }))
+        })
+        .await
+        .unwrap();
+        let BoardWrite::Refused(result) = answer else {
+            panic!("recovery must not become success or file permission")
+        };
+        assert!(result.is_error);
+        let value: serde_json::Value =
+            serde_json::from_str(&super::mounting_hole_tests::result_text(&result)).unwrap();
+        assert_eq!(value["error"]["kind"], "ipc_batch_recovered");
+        assert_eq!(value["error"]["board_state"], "unchanged");
+        assert_eq!(value["error"]["drop_confirmed"], true);
+        assert_eq!(value["error"]["retry_safe"], false);
+        assert_eq!(std::fs::read(&board).unwrap(), before);
+        assert!(ctx.board_session.was_observed_live(&board));
     }
 
     /// KiCad up on another project is the ordinary state of a machine where
