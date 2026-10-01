@@ -1083,6 +1083,7 @@ fn patch_claude_settings(path: &Path, exe_str: &str) -> Result<usize> {
             .or_insert_with(|| serde_json::json!([]))
             .as_array_mut()
             .context("hook event field is not an array")?;
+        let before = event_arr.clone();
         // Migrate the exact handler installed by the old plain-stdout form.
         // Do not use substring matching: user-authored neighboring handlers
         // and unrelated commands containing "konnect" are not ours.
@@ -1094,7 +1095,6 @@ fn patch_claude_settings(path: &Path, exe_str: &str) -> Result<usize> {
                     .any(|handler| handler["command"].as_str() == Some(command.as_str()))
             })
         };
-        let before = event_arr.clone();
         // Keep one entry for our handler and strip it from the rest. The
         // matcher follows the registry, so an older install's is stale
         // (#739): an entry with the current matcher is kept as it is; else
@@ -1629,6 +1629,39 @@ mod tests {
             })
         );
         assert_eq!(entries.len(), HOOK_SKILLS.len() + 1);
+
+        let before = fs::read_to_string(&settings_path).unwrap();
+        assert_eq!(patch_claude_settings(&settings_path, exe).unwrap(), 0);
+        assert_eq!(fs::read_to_string(&settings_path).unwrap(), before);
+    }
+
+    /// Removing the legacy handler is a change even when the current entry
+    /// is already in place, so `init` does not report "no changes".
+    #[test]
+    fn install_counts_a_removed_legacy_handler_beside_a_current_entry() {
+        let temp = TempDir::new().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let exe = "/opt/konnect/konnect";
+        let hook = &HOOK_SKILLS[0];
+        patch_claude_settings(&settings_path, exe).unwrap();
+        let current = read_entries(&settings_path, hook.event);
+        let mut seeded = current.clone();
+        seeded.push(serde_json::json!({
+            "matcher": "mcp__konnect__.*",
+            "hooks": [
+                {"type": "command", "command": legacy_hook_command(exe, hook.name)},
+                {"type": "command", "command": "user-board-check"}
+            ]
+        }));
+        seed_settings(&settings_path, hook.event, seeded.into());
+
+        assert_eq!(patch_claude_settings(&settings_path, exe).unwrap(), 1);
+        let mut expected = current;
+        expected.push(serde_json::json!({
+            "matcher": "mcp__konnect__.*",
+            "hooks": [{"type": "command", "command": "user-board-check"}]
+        }));
+        assert_eq!(read_entries(&settings_path, hook.event), expected);
 
         let before = fs::read_to_string(&settings_path).unwrap();
         assert_eq!(patch_claude_settings(&settings_path, exe).unwrap(), 0);
