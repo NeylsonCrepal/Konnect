@@ -30,6 +30,7 @@ pub(crate) enum LiveBoard<T> {
     /// naming the board. It may hold it, so the saved file is not
     /// authoritative.
     Rejected(String),
+    Uncertain(String),
     /// KiCad answered without ever naming a board document, so nothing was
     /// identified. `absence` says which answer that was: no handler for board
     /// documents — the project manager running with no PCB editor open, the
@@ -114,6 +115,7 @@ where
 
     Ok(match failure {
         konnect_ipc::IpcFailure::Rejected(message) => LiveBoard::Rejected(message),
+        konnect_ipc::IpcFailure::Uncertain(message) => LiveBoard::Uncertain(message),
         konnect_ipc::IpcFailure::Target { error, message } if error.proves_not_open() => {
             if observed_live {
                 LiveBoard::LostAfterObservation {

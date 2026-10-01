@@ -382,6 +382,13 @@ pub(crate) async fn handle_update_pcb_from_schematic(
             reason.premise()
         )),
         BoardWrite::Refused(result) => {
+            // Preserve the structured uncertain outcome instead of claiming
+            // the sync was a preflight conflict with no applied changes.
+            if crate::mcp::error::extract_error_kind(&result).as_deref()
+                == Some("ipc_outcome_unknown")
+            {
+                return Ok(result);
+            }
             let message = result
                 .content
                 .into_iter()

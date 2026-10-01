@@ -1,5 +1,20 @@
 # Troubleshooting
 
+## IPC operation returned `ipc_outcome_unknown`
+
+Stop automatic retries. Konnect sent a request but could not establish its
+outcome, or a transaction's attempted rollback failed. The live board may
+contain some or all of the requested changes; this is not proof that nothing
+happened. The structured error reports `board_state: unknown` and
+`retry_safe: false`.
+
+Inspect the requested board in KiCad and reconcile what was actually applied
+before repeating any mutation. Do not edit the saved file as a workaround:
+it may be older than the live editor state. Keep the full diagnostic, including
+any commit identifier, when reporting the failure. The first #658 safety fix
+does not provide automatic transaction recovery or establish that an undo
+will reverse a pending, unpublished commit.
+
 ## Which Konnect binary is this client using?
 
 Call the always-visible `get_installation_info` tool in the affected MCP

@@ -2731,6 +2731,76 @@ mod sheet_pin_geometry_dispatch_tests {
 }
 
 #[cfg(test)]
+mod ipc_uncertainty_dispatch_tests {
+    use super::*;
+    use crate::test_support::MockIpcServer;
+    use crate::tools::{pcb_board::board_mock::board_document, ServerConfig};
+    use konnect_ipc::{builders::pack_any, gen::kiapi};
+
+    #[tokio::test]
+    async fn served_write_preserves_unknown_outcome_and_saved_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board.kicad_pcb");
+        let before = include_str!("../../../konnect-sexp/tests/fixtures/gr_poly_outline.kicad_pcb");
+        std::fs::write(&board, before).unwrap();
+        let document = board_document(&board.to_string_lossy());
+        let mock = MockIpcServer::spawn("unknown-write", move |request| {
+            let command = request.message.unwrap();
+            if command.type_url.ends_with("GetOpenDocuments") {
+                kiapi::common::ApiResponse {
+                    status: Some(kiapi::common::ApiResponseStatus {
+                        status: kiapi::common::ApiStatusCode::AsOk as i32,
+                        error_message: String::new(),
+                    }),
+                    header: None,
+                    message: Some(pack_any(
+                        &kiapi::common::commands::GetOpenDocumentsResponse {
+                            documents: vec![document.clone()],
+                        },
+                        "kiapi.common.commands.GetOpenDocumentsResponse",
+                    )),
+                }
+            } else {
+                kiapi::common::ApiResponse {
+                    status: None,
+                    header: None,
+                    message: None,
+                }
+            }
+        });
+        let handler = McpHandler::new(ServerConfig {
+            kicad_cli: String::new(),
+            kicad_binary: String::new(),
+            ipc_address: mock.address().to_string(),
+            project_dir: None,
+            jlcpcb_db_path: None,
+            auto_load_toolsets: false,
+            eager_toolsets: true,
+        })
+        .await
+        .unwrap();
+        let response = handler
+            .handle_message(json!({
+                "jsonrpc": "2.0", "id": 658, "method": "tools/call",
+                "params": { "name": "add_mounting_hole", "arguments": {
+                    "board": board.to_string_lossy(), "x": 5.0, "y": 6.0, "reference": "H1"
+                }}
+            }))
+            .await
+            .unwrap();
+        let result = response.result.unwrap();
+        assert_eq!(result["isError"], true, "{result}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let value: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(value["error"]["kind"], "ipc_outcome_unknown", "{value}");
+        assert_eq!(value["error"]["retry_safe"], false);
+        assert_eq!(value["error"]["board_state"], "unknown");
+        assert!(!text.contains("was not modified"));
+        assert_eq!(std::fs::read_to_string(board).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
 mod component_properties_dispatch_tests {
     use super::*;
     use crate::tools::ServerConfig;

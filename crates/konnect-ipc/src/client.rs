@@ -887,14 +887,18 @@ impl std::error::Error for BoardTargetError {}
 /// `Target` retains a typed board-identity decision. Only target errors whose
 /// [`BoardTargetError::proves_not_open`] is true may permit a file fallback.
 ///
-/// `Rejected` is everything else, including any error after a request was
-/// delivered (a receive timeout may mean KiCad is still processing it).
+/// `Uncertain` means no authoritative reply established the delivered
+/// request's outcome, or a transaction's rollback failed. `Rejected` covers
+/// the remaining failures, including explicit API refusals.
 /// KiCad is — or may be — alive on the other end, so a file edit could be
 /// silently overwritten on its next save. Fail closed.
 #[derive(Debug)]
 pub enum IpcFailure {
     Unreachable(String),
     Rejected(String),
+    /// A delivered request has no confirmed outcome. Never retry a mutation
+    /// or fall back to a file write on this evidence.
+    Uncertain(String),
     Target {
         error: BoardTargetError,
         message: String,
@@ -907,7 +911,9 @@ impl IpcFailure {
     /// message text.
     pub fn from_error(error: anyhow::Error) -> Self {
         let message = format!("{error:#}");
-        if let Some(target) = error
+        if error.downcast_ref::<IpcOutcomeUnknown>().is_some() {
+            IpcFailure::Uncertain(message)
+        } else if let Some(target) = error
             .chain()
             .find_map(|cause| cause.downcast_ref::<BoardTargetError>().cloned())
         {
@@ -926,10 +932,26 @@ impl IpcFailure {
         match self {
             IpcFailure::Unreachable(message)
             | IpcFailure::Rejected(message)
+            | IpcFailure::Uncertain(message)
             | IpcFailure::Target { message, .. } => message,
         }
     }
 }
+
+/// The request was sent, but no authoritative response was obtained.
+#[derive(Debug)]
+pub struct IpcOutcomeUnknown {
+    pub command: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for IpcOutcomeUnknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "KiCad IPC outcome unknown for {}: {}. Do not retry the mutation until the live board has been reconciled", self.command, self.reason)
+    }
+}
+
+impl std::error::Error for IpcOutcomeUnknown {}
 
 impl std::fmt::Display for IpcFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1087,18 +1109,25 @@ impl KiCadIpcClient {
         })?;
 
         // Receive response
-        let reply = socket
-            .recv()
-            .map_err(|e| anyhow::anyhow!("NNG recv failed: {}", e))?;
+        let reply = socket.recv().map_err(|e| {
+            anyhow::Error::new(IpcOutcomeUnknown {
+                command: type_name.to_string(),
+                reason: format!("NNG recv failed after send: {e}"),
+            })
+        })?;
 
-        let response = kiapi::common::ApiResponse::decode(reply.as_slice())
-            .context("Failed to decode ApiResponse")?;
+        let response = kiapi::common::ApiResponse::decode(reply.as_slice()).map_err(|error| {
+            anyhow::Error::new(IpcOutcomeUnknown {
+                command: type_name.to_string(),
+                reason: format!("Failed to decode ApiResponse: {error}"),
+            })
+        })?;
 
         // A response without an envelope status is malformed, not success.
-        let status = response
-            .status
-            .as_ref()
-            .context("KiCad IPC response is missing its status")?;
+        let status = response.status.as_ref().ok_or_else(|| IpcOutcomeUnknown {
+            command: type_name.to_string(),
+            reason: "KiCad IPC response is missing its status".to_string(),
+        })?;
         let code = status.status();
         if code != kiapi::common::ApiStatusCode::AsOk {
             let msg = if status.error_message.is_empty() {
@@ -2201,8 +2230,9 @@ impl KiCadIpcClient {
 
     /// Run a multi-step mutation as one KiCad undo transaction.
     ///
-    /// Any operation error, or a failure to publish the commit, triggers a
-    /// best-effort drop so callers never knowingly leave a partial batch.
+    /// Confirmed failures trigger a best-effort drop. An unknown delivered
+    /// request does not: a blind drop can race an unfinished mutation or a
+    /// commit that was already published. The caller must reconcile live state.
     pub fn run_commit<T>(
         &self,
         description: &str,
@@ -2214,17 +2244,26 @@ impl KiCadIpcClient {
         match operation_result {
             Err(panic) => {
                 if let Err(rollback_error) = self.drop_commit(&commit_id) {
-                    anyhow::bail!("KiCad batch panicked and rollback failed ({rollback_error})");
+                    return Err(anyhow::Error::new(IpcOutcomeUnknown {
+                        command: "EndCommit".to_string(),
+                        reason: format!("commit {commit_id}: batch panicked and rollback failed ({rollback_error:#})"),
+                    }));
                 }
                 std::panic::resume_unwind(panic)
             }
             Ok(Ok(value)) => {
                 if let Err(commit_error) = self.push_commit(&commit_id, description) {
+                    if commit_error.downcast_ref::<IpcOutcomeUnknown>().is_some() {
+                        return Err(commit_error).context(format!(
+                            "publish outcome unknown for commit {commit_id}; no blind rollback attempted"
+                        ));
+                    }
                     let rollback_error = self.drop_commit(&commit_id).err();
                     if let Some(rollback_error) = rollback_error {
-                        anyhow::bail!(
-                            "failed to publish KiCad commit ({commit_error}); rollback also failed ({rollback_error})"
-                        );
+                        return Err(commit_error.context(IpcOutcomeUnknown {
+                            command: "EndCommit".to_string(),
+                            reason: format!("commit {commit_id}: publish failed; rollback also failed ({rollback_error:#})"),
+                        }));
                     }
                     return Err(commit_error)
                         .context("failed to publish KiCad commit; changes dropped");
@@ -2232,10 +2271,19 @@ impl KiCadIpcClient {
                 Ok(value)
             }
             Ok(Err(operation_error)) => {
+                if operation_error
+                    .downcast_ref::<IpcOutcomeUnknown>()
+                    .is_some()
+                {
+                    return Err(operation_error).context(format!(
+                        "batch outcome unknown for commit {commit_id}; no blind rollback attempted"
+                    ));
+                }
                 if let Err(rollback_error) = self.drop_commit(&commit_id) {
-                    anyhow::bail!(
-                        "KiCad batch failed ({operation_error}); rollback also failed ({rollback_error})"
-                    );
+                    return Err(operation_error.context(IpcOutcomeUnknown {
+                        command: "EndCommit".to_string(),
+                        reason: format!("commit {commit_id}: operation failed; rollback also failed ({rollback_error:#})"),
+                    }));
                 }
                 Err(operation_error).context("KiCad batch failed; changes dropped")
             }
@@ -4931,6 +4979,35 @@ fn first_duplicate<'a>(paths: &[&'a PathBuf]) -> Option<&'a PathBuf> {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn receive_timeout_is_typed_unknown_not_unreachable() {
+        use nng::options::Options;
+        let socket = nng::Socket::new(nng::Protocol::Rep0).unwrap();
+        let address = format!("inproc://timeout-marker-{}", std::process::id());
+        socket.listen(&address).unwrap();
+        socket
+            .set_opt::<nng::options::RecvTimeout>(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let worker = std::thread::spawn(move || {
+            let _request = socket.recv().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+        let error = KiCadIpcClient::new(address)
+            .send_command_within(
+                &kiapi::common::commands::Ping {},
+                "kiapi.common.commands.Ping",
+                std::time::Duration::from_millis(20),
+            )
+            .unwrap_err();
+        assert!(error.downcast_ref::<IpcOutcomeUnknown>().is_some());
+        assert!(!is_transport_unreachable(&error));
+        assert!(matches!(
+            IpcFailure::from_error(error),
+            IpcFailure::Uncertain(_)
+        ));
+        worker.join().unwrap();
+    }
 
     #[test]
     fn dial_failure_does_not_expose_endpoint_secrets() {
