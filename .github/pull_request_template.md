@@ -73,9 +73,13 @@ mark individual inapplicable rows with a reason. Do not invent runtime evidence.
 
 - [ ] The diff is focused and contains no generated output, personal data, or unrelated cleanup.
 - [ ] The branch includes current `upstream/main`, has no merge conflicts, and CI passed on this exact head.
+- [ ] For a fork PR, maintainer edits are enabled, or the author accepts
+  responsibility for the final current-main refresh.
 - [ ] The branch was based on latest `upstream/main`, not a release tag (unless this is an approved backport).
 - [ ] The PR shows only its unique commits and diff; dependencies and series position are explicit.
-- [ ] Every review conversation is resolved; any post-review push or base change has been reviewed again on the new exact head.
+- [ ] Every review conversation is resolved; any post-review push or base refresh
+  has been reviewed on the new exact head. An unchanged unique diff may use a
+  focused refresh review; changed behavior received substantive re-review.
 - [ ] New names follow `docs/NAMING_CONVENTIONS.md`; public renames include compatibility handling.
 - [ ] New behavior and failure paths have regression coverage.
 - [ ] File mutations are atomic and preserve unrelated content.

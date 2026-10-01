@@ -40,8 +40,9 @@ independent.
 - **Merge commits only** (`gh pr merge N --merge`), so authorship survives.
 - **The active `main: CI must pass` ruleset is the protection source of truth.**
   It requires pull requests, all ten CI checks, and resolved review threads;
-  blocks force-pushes and deletion; and permits only merge commits. Repository
-  auto-merge and automatic deletion of merged topic branches are enabled.
+  requires the head branch to include current `main`; blocks force-pushes and
+  deletion; and permits only merge commits. Repository auto-merge and automatic
+  deletion of merged topic branches are enabled.
 - A write collaborator cannot bypass the ruleset. Any owner-only direct-push
   exception is reserved for the documented release recipe's bump/stamp commits;
   it is not an ordinary merge shortcut.
@@ -82,16 +83,26 @@ independent.
    impact, and available evidence. Resolve every review conversation.
 2. If work remains, apply the one `status:*` label naming the next actor. Do not
    arm auto-merge.
-3. When the PR is genuinely merge-ready, replace its workflow-state label with
+3. Refresh only the next-to-land PR when `main` moves. If the branch is merely
+   behind, has no conflicts, contains only its own change and permits maintainer
+   edits, a maintainer may run `gh pr update-branch N --rebase`. Record the old
+   head and current base before updating. A conflict, cumulative/copied history,
+   disabled maintainer edits or a changed unique diff returns the PR to its
+   author instead.
+4. Treat the refreshed SHA as a new exact head. Required CI must rerun. When the
+   unique commits and diff are semantically unchanged, the maintainer may record
+   a focused review of the refresh against the completed substantive review;
+   changed behavior requires substantive re-review.
+5. When the PR is genuinely merge-ready, replace its workflow-state label with
    `status:ready-to-merge`. If checks are still running, arm GitHub auto-merge
    with the **merge commit** method. If every requirement is already green,
    merge with `gh pr merge N --merge` after the same final verification.
-4. Any new commit, force-push, base change, required-check regression, or newly
+6. Any new commit, force-push, base change, required-check regression, or newly
    unresolved conversation invalidates the readiness decision. Return the PR to
    the appropriate state, review the new exact head, and arm it again only after
    the gate is restored. GitHub may automatically disable auto-merge after a
    fork contributor pushes; that is expected safety behavior.
-5. After merge, synchronize local `main`, verify the merge commit, terminal
+7. After merge, synchronize local `main`, verify the merge commit, terminal
    issue closure, and acceptance evidence, then promote only the next PR in the
    documented dependency order. Run the complete local gate above only when
    one of its explicit conditions applies. GitHub deletes the merged topic
@@ -123,9 +134,10 @@ Maintainers apply these queue rules:
 - After a prerequisite merges, the author reconstructs the next PR from current
   `main` with only its unique commits. A previous green run on a cumulative head
   is obsolete.
-- A PR with copied prerequisites, a stale base, or unresolved conflicts is not
-  ready for final review. Maintainers may return it to draft and request a clean
-  reconstruction rather than repeatedly resolving contributor branch history.
+- A PR with copied prerequisites or unresolved conflicts is not ready for final
+  review. A merely behind branch can be refreshed by a maintainer only when it
+  reaches the front of the queue and the update is clean. Misleading cumulative
+  history still requires reconstruction rather than repeated maintainer repair.
 - A short-lived `integration/<topic>` branch requires maintainer agreement on
   scope, ownership, synchronization, evidence, terminal issue closure, and an
   expiry. Child PRs receive focused review and CI before one final integration PR
@@ -167,8 +179,9 @@ Within an overlap set the order is not arbitrary:
    of an active queue. v0.10.0 ignored this and invalidated eleven open PRs in
    one push. This rule exists because of that, not in anticipation of it.
 7. After each merge: update `main`, verify the merge and issue state, run the
-   full local gate only when its documented conditions apply, promote the next
-   PR, and arm auto-merge only once the exact head has been reviewed.
+   full local gate only when its documented conditions apply, promote and refresh
+   only the next PR, and arm auto-merge only once the refreshed exact head has
+   been reviewed and its required checks pass.
 
 ## Releases
 
