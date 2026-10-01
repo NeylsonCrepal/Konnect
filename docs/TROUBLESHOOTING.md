@@ -30,6 +30,13 @@ window. The remaining allowance is shared by rollback and verification, not
 renewed at each step. Missing or late publish replies cannot be rolled back
 automatically; failed verification still reports `ipc_outcome_unknown`.
 
+Sync creates are sent in ordered groups of at most 32 footprints, with every
+group and the updates inside one KiCad commit. A successful apply is one Undo
+entry, not one entry per group. This bounds the item count, not the serialized
+request bytes: it does not establish KiCad's listener size limit or eliminate
+timeouts. A rejected or uncertain group stops the apply; Konnect never retries
+it or publishes a partial group sequence automatically.
+
 ## Which Konnect binary is this client using?
 
 Call the always-visible `get_installation_info` tool in the affected MCP
