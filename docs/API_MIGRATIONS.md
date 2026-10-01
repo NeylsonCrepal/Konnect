@@ -347,6 +347,7 @@ schematic; a blank sheet still reports its root with `"violations": []`
 (measured on 10.0.5), so a real ERC run is unaffected. Fields the schema leaves
 optional (`items`, `pos`, `uuid`) stay optional. No argument or success-path
 response field changed.
+
 ## Unreleased: placement stops trusting the outline's bounding box (minor release)
 
 `score_placement`, `auto_place_from_schematic` and
@@ -374,9 +375,10 @@ shapes: the bounding box is reported as advice, never as proof.
   operation and the advisory bounding box, whether `dry_run` or apply was
   asked for. Nothing is planned or written. A rectangular or missing
   outline behaves as before.
-- **`place_decoupling_caps`** reports `outline_unproven` in its before and
-  after verdicts, since it scores through `score_placement`. That verdict
-  alone does not block it; only a new `hard_fail` does, as before.
+- **`place_decoupling_caps`** reports `outline_unproven` in its planned
+  verdict and blocks application on an unproven outline. A dry-run can
+  expose the blocked plan, but its advisory bounding box cannot authorize
+  a write.
 
 No argument changed. A caller that treated `score_placement`'s `pass` as the
 only non-failing verdict must also handle `outline_unproven`. On such a

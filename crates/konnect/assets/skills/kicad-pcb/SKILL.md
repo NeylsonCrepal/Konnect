@@ -189,6 +189,8 @@ after its own plan, so a change is judged before it is made:
 5. `place_decoupling_caps` — plans a row beside an IC from exact caller-given
    `capacitor_references` (never net-inferred); reports a blocked plan status
    naming why, and refuses to apply an out-of-bounds or non-improving plan.
+   An unproven outline also blocks application: the advisory bbox is not
+   evidence that a capacitor's planned placement fits the board.
 6. `plan_bga_fanout` — pitch detected from the pad grid; `apply` executes as
    one KiCad undo commit over live IPC.
 

@@ -677,8 +677,15 @@ async fn handle_place_decoupling(
     let row_span: f64 =
         widths.iter().map(|(w, _)| w).sum::<f64>() + spacing * (caps.len() as f64 - 1.0);
 
-    let outline = board_outline_bbox(&tree);
+    let outline_shape = board_outline_shape(&tree);
+    let outline = match outline_shape {
+        OutlineShape::Rectangular { bbox } => Some(bbox),
+        OutlineShape::Unproven { .. } | OutlineShape::Missing => None,
+    };
     let mut applicability = PlanApplicability::new();
+    if matches!(outline_shape, OutlineShape::Unproven { .. }) {
+        applicability.block("the board outline is unproven; bounding-box containment cannot authorize capacitor placement; use small explicit moves and KiCad validation");
+    }
 
     let mut placements = Vec::new();
     let mut planned_moves = Vec::new();
@@ -3135,6 +3142,72 @@ mod tests {
         let path = dir.path().join("board.kicad_pcb");
         std::fs::copy(FIXTURE, &path).unwrap();
         path
+    }
+
+    #[tokio::test]
+    async fn served_decoupling_blocks_unproven_containment_without_writing() {
+        // Combine footprints and the concave outline from two KiCad-written
+        // fixtures. Retag the original rectangular edges so only the real
+        // concave polygon defines the outline.
+        let outline = std::fs::read_to_string(GR_POLY_FIXTURE).unwrap();
+        let polygon = &outline
+            [outline.find("\t(gr_poly").unwrap()..outline.find("\t(embedded_fonts").unwrap()];
+        let mut content = std::fs::read_to_string(FIXTURE)
+            .unwrap()
+            .replace("(layer \"Edge.Cuts\")", "(layer \"Dwgs.User\")");
+        content.insert_str(content.rfind(')').unwrap(), polygon);
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("unproven.kicad_pcb");
+        std::fs::write(&board, content).unwrap();
+        let before = std::fs::read(&board).unwrap();
+        let handler = crate::mcp::handler::McpHandler::new(crate::tools::ServerConfig {
+            kicad_cli: String::new(),
+            kicad_binary: String::new(),
+            ipc_address: String::new(),
+            project_dir: None,
+            jlcpcb_db_path: None,
+            auto_load_toolsets: true,
+            eager_toolsets: false,
+        })
+        .await
+        .unwrap();
+        for (id, dry_run) in [(5944, true), (5945, false)] {
+            let response = handler
+                .handle_message(json!({
+                    "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                    "params": { "name": "place_decoupling_caps", "arguments": {
+                        "board": board.to_string_lossy(), "ic_reference": "U1",
+                        "capacitor_references": ["C1", "C2"], "dry_run": dry_run
+                    }}
+                }))
+                .await
+                .unwrap()
+                .result
+                .unwrap();
+            let body: serde_json::Value =
+                serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+            if dry_run {
+                assert_eq!(response["isError"], false, "{body}");
+                assert_eq!(body["verdict_after_plan"], "outline_unproven", "{body}");
+                assert_eq!(body["plan_status"], "blocked", "{body}");
+                assert!(
+                    body["blocking_reasons"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|reason| reason.as_str().unwrap().contains("outline is unproven")),
+                    "{body}"
+                );
+            } else {
+                assert_eq!(response["isError"], true, "{body}");
+                assert_eq!(body["error"]["kind"], "plan_blocked", "{body}");
+                assert_eq!(
+                    body["error"]["operation"], "place_decoupling_caps",
+                    "{body}"
+                );
+            }
+            assert_eq!(std::fs::read(&board).unwrap(), before);
+        }
     }
 
     fn ctx_with_open_board(
