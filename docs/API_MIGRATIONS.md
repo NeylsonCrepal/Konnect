@@ -348,6 +348,43 @@ schematic; a blank sheet still reports its root with `"violations": []`
 optional (`items`, `pos`, `uuid`) stay optional. No argument or success-path
 response field changed.
 
+## Unreleased: placement stops trusting the outline's bounding box (minor release)
+
+`score_placement`, `auto_place_from_schematic` and
+`refine_placement_force_directed` treated every Edge.Cuts outline as its
+bounding box (#594). On a concave, notched, rounded, rotated or
+multi-boundary board, a part could sit inside the bounding box but off the
+board and still score as inside it, or be placed there.
+
+Konnect now classifies the outline. It is `rectangular` only when it is
+provably an axis-aligned rectangle: a single `gr_rect`, a four-vertex
+`gr_poly` whose edges are the rectangle's four sides in order, or four
+`gr_line` segments that are its four sides, each once. Any other outline
+that parses is `unproven`, and there is no containment engine for those
+shapes: the bounding box is reported as advice, never as proof.
+
+- **`score_placement`** adds `outline_shape` (`"rectangular"`, `"unproven"`
+  or `"missing"`) and `outline_unproven: bool`. On an unproven outline the
+  `outside_outline` hard failure and the connector-edge check are skipped,
+  and the verdict is the new `outline_unproven` instead of `pass`. Verdict
+  precedence is `hard_fail`, then `outline_missing`, then
+  `outline_unproven`, then `pass`. A rectangular outline scores exactly as
+  before.
+- **`auto_place_from_schematic`** and **`refine_placement_force_directed`**
+  refuse an unproven outline with `error.kind: "plan_blocked"`, naming the
+  operation and the advisory bounding box, whether `dry_run` or apply was
+  asked for. Nothing is planned or written. A rectangular or missing
+  outline behaves as before.
+- **`place_decoupling_caps`** reports `outline_unproven` in its planned
+  verdict and blocks application on an unproven outline. A dry-run can
+  expose the blocked plan, but its advisory bounding box cannot authorize
+  a write.
+
+No argument changed. A caller that treated `score_placement`'s `pass` as the
+only non-failing verdict must also handle `outline_unproven`. On such a
+board, place parts with small explicit moves and check the saved board with
+KiCad DRC.
+
 ## Unreleased: configuration tools refuse a file they cannot use (minor release)
 
 `load_user_config`, `save_user_config`, `load_project_config`,
