@@ -1,5 +1,19 @@
 # Troubleshooting
 
+## JLCPCB assembly cannot obtain native midpoint geometry
+
+Open the exact requested `.kicad_pcb` in PCB Editor and enable KiCad IPC.
+JLCPCB assembly export requires native per-pad bounding boxes; a saved file or
+another open board is not a substitute. Stop editing during export. A missing
+box or changing live snapshot refuses the attempt before output creation;
+retry after correcting the reported cause. The tool does not save or modify
+your board. Generic and fabrication-only exports retain file-based behavior.
+
+If positions move after upgrading, review old anchor-compensation offsets in
+your correction policy. Midpoints now precede user corrections, so old
+workarounds can double-correct them. See [JLCPCB coordinates and evidence](JLCPCB_CPL_CORRECTIONS.md).
+Always inspect the fabricator's placement preview before ordering.
+
 ## IPC operation returned `ipc_outcome_unknown`
 
 Stop automatic retries. Konnect sent a request but could not establish its

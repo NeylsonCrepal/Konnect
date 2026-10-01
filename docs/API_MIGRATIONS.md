@@ -1698,6 +1698,16 @@ pass `prefer` (use the native export when available, otherwise Rust) or
 `require` (refuse when the native bridge is unavailable). No tool or argument
 was removed.
 
+## Unreleased: JLCPCB CPL uses native pad-box midpoints
+
+JLCPCB assembly packages now require the requested board open in KiCad with IPC
+enabled. `Mid X`/`Mid Y` use the union of KiCad's native board-space pad boxes,
+then apply the existing correction policy. Board exports share one stable live
+snapshot without saving the editor. Missing pad geometry or concurrent edits
+refuse export before creating output. Other manufacturers and no-assembly
+exports are unchanged. Review legacy anchor-compensation offsets to avoid double
+correction; see [coordinates and evidence](JLCPCB_CPL_CORRECTIONS.md#matching-and-coordinates).
+
 ## Unreleased: JLCPCB manufacturing files use vendor-ready names and schema
 
 `export_manufacturing_package(fab_house="jlcpcb", include_assembly=true)` now

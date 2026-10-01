@@ -15,6 +15,7 @@ mod footprint_graphics;
 mod footprint_metadata;
 mod footprint_models;
 pub mod integration;
+mod jlcpcb_midpoints;
 pub mod library;
 pub(crate) mod live_board;
 pub mod manufacturing;
