@@ -5259,11 +5259,12 @@ mod recovery_tests {
         let control = server.clone();
         let calls = Arc::new(Mutex::new(Vec::new()));
         let observed = calls.clone();
+        let project_directory = tempfile::tempdir().unwrap();
         let document = kiapi::common::types::DocumentSpecifier {
             r#type: kiapi::common::types::DocumentType::DoctypePcb as i32,
             project: Some(kiapi::common::types::ProjectSpecifier {
                 name: "test".into(),
-                path: "C:/design".into(),
+                path: project_directory.path().to_string_lossy().into_owned(),
             }),
             identifier: Some(
                 kiapi::common::types::document_specifier::Identifier::BoardFilename(
