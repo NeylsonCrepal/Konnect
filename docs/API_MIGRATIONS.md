@@ -3,6 +3,21 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: `create_schematic` and `set_schematic_page` move to `sch_hierarchy` (minor release)
+
+`create_schematic` and `set_schematic_page` move from the `sch_components`
+toolset to `sch_hierarchy`. Both act on a whole sheet file rather than on a
+symbol: one creates the file, the other sets its paper size and orientation.
+Their names, arguments and responses are unchanged.
+
+A client that loads only `sch_components` and then calls either tool now gets
+`toolset_not_loaded` naming `sch_hierarchy`; load that toolset as well. With
+`auto_load_toolsets` enabled the call loads it automatically, as before.
+
+`sch_components` drops to 18 tools and `sch_hierarchy` rises to 14. The two
+freed slots leave room under the 20-tool toolset cap for a symbol-mirroring
+tool (#450).
+
 ## Unreleased: autonomous placement apply retired and decoupling evidence narrowed (#754)
 
 `auto_place_from_schematic` is now a deprecated diagnostic planner only. Its
@@ -103,7 +118,6 @@ an inconsistent pin onto another pin and join their nets without an ERC
 warning. Correct the intended side/position explicitly with `edit_sheet_pin`
 and verify the netlist. The validator does not modify either schematic, and
 the existing add/edit behavior when `side` is omitted is unchanged (#687).
-
 ## Unreleased: reading the board's physical stackup (minor release)
 
 The `pcb_board` toolset adds `get_board_stackup`. It reads the physical

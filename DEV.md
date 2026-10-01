@@ -92,14 +92,14 @@ Konnect/
 │   │           ├── cli.rs            # kicad-cli v10 subprocess wrapper (verified against actual binary)
 │   │           ├── svg_import.rs     # SVG parsing + Bezier flattening for import_svg_logo (usvg-backed)
 │   │           ├── project.rs        # 7 tools (incl. open_schematic_viewer)
-│   │           ├── sch_components.rs # 20 tools (component placement with lib_symbols embedding)
+│   │           ├── sch_components.rs # 18 tools (component placement with lib_symbols embedding)
 │   │           ├── sch_wiring.rs     # 20 tools (incl. connect_pins, power symbol embedding)
 │   │           ├── sch_analysis.rs   # 15 tools (union-find net graph, connectivity)
 │   │           ├── sch_batch.rs      # 12 tools (single-read/single-write atomic operations)
 │   │           ├── sch_export.rs     # 7 tools (SVG/PDF/netlist/ERC/PCB sync)
 │   │           ├── sch_bus.rs        # 4 tools (buses, bus entries, pin fan-out)
 │   │           ├── pcb_sync.rs       # update_pcb_from_schematic: pure planner + one-commit IPC apply
-│   │           ├── sch_hierarchy.rs  # 12 tools (typed Sheet model, sheet CRUD + hierarchy/page queries + pin lifecycle)
+│   │           ├── sch_hierarchy.rs  # 14 tools (typed Sheet model, sheet-file creation and page size, sheet CRUD + hierarchy/page queries + pin lifecycle)
 │   │           ├── pcb_board.rs      # 11 tools (S-expr file editing, IPC fallback, SVG logo import)
 │   │           ├── pcb_components.rs # 20 tools (IPC real-time + safe headless single-placement fallback)
 │   │           ├── pcb_footprint_update.rs # library refresh planner + one-commit IPC apply
