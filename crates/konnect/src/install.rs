@@ -210,15 +210,6 @@ fn legacy_hook_command_tail(hook_name: &str) -> String {
     format!(" skill {hook_name}")
 }
 
-/// Every handler command registered under one hook event array.
-fn handler_commands(event_arr: &[serde_json::Value]) -> impl Iterator<Item = &str> {
-    event_arr
-        .iter()
-        .filter_map(|entry| entry["hooks"].as_array())
-        .flatten()
-        .filter_map(|handler| handler["command"].as_str())
-}
-
 /// Double-click behavior remains Claude-focused for backward compatibility.
 pub fn run_double_click_install() -> Result<()> {
     println!("===========================================");
@@ -1082,10 +1073,11 @@ fn patch_claude_settings(path: &Path, exe_str: &str) -> Result<usize> {
         .as_object_mut()
         .context("hooks field is not an object")?;
 
-    let mut added = 0;
+    let mut patched = 0;
     for hook in HOOK_SKILLS {
         let command = hook_command(exe_str, "hook", hook.name);
         let legacy_command = legacy_hook_command(exe_str, hook.name);
+        let matcher = hook_matcher(hook)?;
         let event_arr = hooks_obj
             .entry(hook.event)
             .or_insert_with(|| serde_json::json!([]))
@@ -1095,24 +1087,67 @@ fn patch_claude_settings(path: &Path, exe_str: &str) -> Result<usize> {
         // Do not use substring matching: user-authored neighboring handlers
         // and unrelated commands containing "konnect" are not ours.
         remove_exact_commands(event_arr, &[legacy_command.as_str()]);
-        let already_exists = handler_commands(event_arr).any(|candidate| candidate == command);
-        if !already_exists {
-            event_arr.push(serde_json::json!({
-                "matcher": hook_matcher(hook)?,
-                "hooks": [{
-                    "type": "command",
-                    "command": command
-                }]
-            }));
-            added += 1;
+        let holds_ours = |entry: &serde_json::Value| {
+            entry["hooks"].as_array().is_some_and(|handlers| {
+                handlers
+                    .iter()
+                    .any(|handler| handler["command"].as_str() == Some(command.as_str()))
+            })
+        };
+        let before = event_arr.clone();
+        // Keep one entry for our handler and strip it from the rest. The
+        // matcher follows the registry, so an older install's is stale
+        // (#739): an entry with the current matcher is kept as it is; else
+        // one where our handler stands alone gets the current matcher; else
+        // a fresh entry is added. A user's handler beside ours keeps the
+        // matcher the user gave it.
+        let current = event_arr
+            .iter()
+            .position(|entry| entry["matcher"] == matcher.as_str() && holds_ours(entry));
+        let sole = || {
+            event_arr.iter().position(|entry| {
+                holds_ours(entry) && entry["hooks"].as_array().is_some_and(|h| h.len() == 1)
+            })
+        };
+        let keep = match current.or_else(sole) {
+            Some(index) => {
+                event_arr[index]["matcher"] = matcher.into();
+                index
+            }
+            None => {
+                event_arr.push(serde_json::json!({
+                    "matcher": matcher,
+                    "hooks": [{
+                        "type": "command",
+                        "command": command
+                    }]
+                }));
+                event_arr.len() - 1
+            }
+        };
+        remove_exact_commands_except(event_arr, &[command.as_str()], Some(keep));
+        if *event_arr != before {
+            patched += 1;
         }
     }
     fs::write(path, serde_json::to_string_pretty(&settings)?)?;
-    Ok(added)
+    Ok(patched)
 }
 
 fn remove_exact_commands(event_arr: &mut Vec<serde_json::Value>, commands: &[&str]) {
-    for entry in event_arr.iter_mut() {
+    remove_exact_commands_except(event_arr, commands, None);
+}
+
+/// [`remove_exact_commands`], leaving the entry at index `keep` untouched.
+fn remove_exact_commands_except(
+    event_arr: &mut Vec<serde_json::Value>,
+    commands: &[&str],
+    keep: Option<usize>,
+) {
+    for (index, entry) in event_arr.iter_mut().enumerate() {
+        if Some(index) == keep {
+            continue;
+        }
         if let Some(handlers) = entry
             .get_mut("hooks")
             .and_then(|hooks| hooks.as_array_mut())
@@ -1453,6 +1488,172 @@ mod tests {
         assert!(!commands.contains(&legacy_hook_command(exe, hook.name).as_str()));
         assert!(commands.contains(&hook_command(exe, "hook", hook.name).as_str()));
         assert!(commands.contains(&"user-neighbor"));
+    }
+
+    fn seed_settings(path: &Path, event: &str, entries: serde_json::Value) {
+        fs::write(
+            path,
+            serde_json::to_string_pretty(&serde_json::json!({"hooks": {event: entries}})).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn read_entries(path: &Path, event: &str) -> Vec<serde_json::Value> {
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        settings["hooks"][event].as_array().unwrap().clone()
+    }
+
+    /// An install made before a board tool was added keeps the old matcher
+    /// until `konnect init` rewrites it (#739).
+    #[test]
+    fn install_refreshes_a_stale_matcher_on_our_own_entry() {
+        let temp = TempDir::new().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let exe = "/opt/konnect/konnect";
+        let hook = &HOOK_SKILLS[0];
+        let command = hook_command(exe, "hook", hook.name);
+        let user_entry = serde_json::json!({
+            "matcher": "Write",
+            "hooks": [{"type": "command", "command": "user-write-check"}]
+        });
+        seed_settings(
+            &settings_path,
+            hook.event,
+            serde_json::json!([{
+                "matcher": "mcp__konnect__(stale_tool)",
+                "hooks": [{"type": "command", "command": command}]
+            }, user_entry]),
+        );
+
+        assert_eq!(
+            patch_claude_settings(&settings_path, exe).unwrap(),
+            HOOK_SKILLS.len()
+        );
+        let entries = read_entries(&settings_path, hook.event);
+        // Rewritten in place, not moved past the user's entry.
+        assert_eq!(
+            entries[0],
+            serde_json::json!({
+                "matcher": hook_matcher(hook).unwrap(),
+                "hooks": [{"type": "command", "command": command}]
+            })
+        );
+        assert_eq!(entries[1], user_entry);
+        assert_eq!(entries.len(), HOOK_SKILLS.len() + 1);
+
+        let before = fs::read_to_string(&settings_path).unwrap();
+        assert_eq!(patch_claude_settings(&settings_path, exe).unwrap(), 0);
+        assert_eq!(fs::read_to_string(&settings_path).unwrap(), before);
+    }
+
+    /// A user handler sharing our stale entry keeps its matcher; only our
+    /// handler moves to an entry with the current one (#739).
+    #[test]
+    fn install_moves_our_handler_out_of_a_mixed_stale_entry() {
+        let temp = TempDir::new().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let exe = "/opt/konnect/konnect";
+        let hook = &HOOK_SKILLS[0];
+        let command = hook_command(exe, "hook", hook.name);
+        seed_settings(
+            &settings_path,
+            hook.event,
+            serde_json::json!([{
+                "matcher": "mcp__konnect__(stale_tool)",
+                "hooks": [
+                    {"type": "command", "command": command},
+                    {"type": "command", "command": "user-board-check"}
+                ]
+            }]),
+        );
+
+        patch_claude_settings(&settings_path, exe).unwrap();
+        let entries = read_entries(&settings_path, hook.event);
+        assert_eq!(
+            entries[0],
+            serde_json::json!({
+                "matcher": "mcp__konnect__(stale_tool)",
+                "hooks": [{"type": "command", "command": "user-board-check"}]
+            })
+        );
+        assert_eq!(
+            entries[1],
+            serde_json::json!({
+                "matcher": hook_matcher(hook).unwrap(),
+                "hooks": [{"type": "command", "command": command}]
+            })
+        );
+        assert_eq!(entries.len(), HOOK_SKILLS.len() + 1);
+    }
+
+    /// Copies of our handler beyond one entry, left by a hand edit or a
+    /// settings merge, are removed; the user's handlers stay (#739).
+    #[test]
+    fn install_keeps_one_entry_for_a_duplicated_handler() {
+        let temp = TempDir::new().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let exe = "/opt/konnect/konnect";
+        let hook = &HOOK_SKILLS[0];
+        let command = hook_command(exe, "hook", hook.name);
+        let current = serde_json::json!({
+            "matcher": hook_matcher(hook).unwrap(),
+            "hooks": [{"type": "command", "command": command}]
+        });
+        seed_settings(
+            &settings_path,
+            hook.event,
+            serde_json::json!([{
+                "matcher": "mcp__konnect__(stale_tool)",
+                "hooks": [{"type": "command", "command": command}]
+            }, current, {
+                "matcher": "mcp__konnect__(user_tool)",
+                "hooks": [
+                    {"type": "command", "command": command},
+                    {"type": "command", "command": "user-board-check"}
+                ]
+            }]),
+        );
+
+        assert_eq!(
+            patch_claude_settings(&settings_path, exe).unwrap(),
+            HOOK_SKILLS.len()
+        );
+        let entries = read_entries(&settings_path, hook.event);
+        assert_eq!(entries[0], current);
+        assert_eq!(
+            entries[1],
+            serde_json::json!({
+                "matcher": "mcp__konnect__(user_tool)",
+                "hooks": [{"type": "command", "command": "user-board-check"}]
+            })
+        );
+        assert_eq!(entries.len(), HOOK_SKILLS.len() + 1);
+
+        let before = fs::read_to_string(&settings_path).unwrap();
+        assert_eq!(patch_claude_settings(&settings_path, exe).unwrap(), 0);
+        assert_eq!(fs::read_to_string(&settings_path).unwrap(), before);
+    }
+
+    /// A user who put a handler into our entry while its matcher is current
+    /// is left alone: nothing is stale, so nothing is rewritten.
+    #[test]
+    fn install_leaves_a_current_mixed_entry_alone() {
+        let temp = TempDir::new().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let exe = "/opt/konnect/konnect";
+        let event = HOOK_SKILLS[0].event;
+        patch_claude_settings(&settings_path, exe).unwrap();
+        let mut entries = read_entries(&settings_path, event);
+        entries[0]["hooks"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"type": "command", "command": "user-board-check"}));
+        seed_settings(&settings_path, event, entries.into());
+        let seeded = fs::read_to_string(&settings_path).unwrap();
+
+        assert_eq!(patch_claude_settings(&settings_path, exe).unwrap(), 0);
+        assert_eq!(fs::read_to_string(&settings_path).unwrap(), seeded);
     }
 
     #[test]
