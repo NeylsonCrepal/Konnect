@@ -2585,6 +2585,152 @@ mod erc_report_shape_dispatch_tests {
 }
 
 #[cfg(test)]
+mod sheet_pin_geometry_dispatch_tests {
+    use super::*;
+    use crate::tools::ServerConfig;
+
+    const ROOT: &str =
+        include_str!("../../tests/fixtures/sheet_pin_edges/sheet_pin_edges.kicad_sch");
+    const CHILD: &str = include_str!("../../tests/fixtures/sheet_pin_edges/child.kicad_sch");
+    const LEFT_PIN: &str = "(at 101.6 106.68 180)";
+
+    async fn handler() -> McpHandler {
+        McpHandler::new(ServerConfig {
+            kicad_cli: String::new(),
+            kicad_binary: String::new(),
+            ipc_address: String::new(),
+            project_dir: None,
+            jlcpcb_db_path: None,
+            auto_load_toolsets: false,
+            eager_toolsets: true,
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn validate(handler: &McpHandler, placement: &str, child_present: bool) -> Value {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sheet_pin_edges.kicad_sch");
+        let child = dir.path().join("child.kicad_sch");
+        assert_eq!(ROOT.matches(LEFT_PIN).count(), 1);
+        let source = ROOT.replace(LEFT_PIN, placement);
+        std::fs::write(&root, &source).unwrap();
+        if child_present {
+            std::fs::write(&child, CHILD).unwrap();
+        }
+        let response = handler
+            .handle_message(json!({
+                "jsonrpc": "2.0", "id": 687, "method": "tools/call",
+                "params": { "name": "validate_sheet_pins", "arguments": { "schematic": root } }
+            }))
+            .await
+            .expect("served tools/call response");
+        let result = response.result.expect("JSON-RPC result");
+        assert_ne!(result["isError"], true, "{result}");
+        assert_eq!(
+            std::fs::read_to_string(&root).unwrap(),
+            source,
+            "validator must not repair the parent"
+        );
+        if child_present {
+            assert_eq!(
+                std::fs::read_to_string(&child).unwrap(),
+                CHILD,
+                "validator must not change the child"
+            );
+        } else {
+            assert!(
+                !child.exists(),
+                "validator must not create the missing child"
+            );
+        }
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn sheet_pin_geometry_reports_the_silent_net_merge_repro_through_dispatch() {
+        let report = validate(&handler().await, "(at 101.6 106.68 0)", true).await;
+        assert_eq!(report["issue_count"], 1, "{report}");
+        let issue = &report["issues"][0];
+        assert_eq!(issue["kind"], "pin_position_mismatch");
+        assert_eq!(issue["sheet"], "child");
+        assert_eq!(issue["pin"], "A");
+        assert_eq!(issue["file"], "child.kicad_sch");
+        assert!(issue["schematic"]
+            .as_str()
+            .unwrap()
+            .ends_with("sheet_pin_edges.kicad_sch"));
+        assert_eq!(
+            issue["stored_position"],
+            json!({"x":101.6,"y":106.68,"rotation":0.0})
+        );
+        let edge = &issue["expected_edge"];
+        assert_eq!(edge["side"], "right");
+        assert_eq!(edge["axis"], "x");
+        assert_eq!(edge["span_axis"], "y");
+        for (field, expected) in [
+            ("coordinate", 152.4),
+            ("span_start", 101.6),
+            ("span_end", 132.08),
+        ] {
+            assert!((edge[field].as_f64().unwrap() - expected).abs() < 1e-6);
+        }
+        assert!(issue["recovery"]
+            .as_str()
+            .unwrap()
+            .contains("edit_sheet_pin"));
+    }
+
+    #[tokio::test]
+    async fn sheet_pin_geometry_checks_all_edges_and_their_spans_through_dispatch() {
+        let handler = handler().await;
+        for (placement, side) in [
+            ("(at 101.6 106.68 0)", "right"),
+            ("(at 152.4 106.68 180)", "left"),
+            ("(at 110 132.08 90)", "top"),
+            ("(at 110 101.6 270)", "bottom"),
+            ("(at 101.6 99 180)", "left"),
+            ("(at 152.4 134 0)", "right"),
+            ("(at 99 101.6 90)", "top"),
+            ("(at 154 132.08 270)", "bottom"),
+        ] {
+            let report = validate(&handler, placement, true).await;
+            assert_eq!(report["issue_count"], 1, "{placement}: {report}");
+            assert_eq!(report["issues"][0]["expected_edge"]["side"], side);
+        }
+        for placement in [
+            LEFT_PIN,
+            "(at 152.4 110 0)",
+            "(at 110 101.6 90)",
+            "(at 110 132.08 270)",
+            "(at 101.6 101.6 180)",
+            "(at 152.4 132.08 0)",
+            "(at 101.6000005 106.68 180)",
+        ] {
+            let report = validate(&handler, placement, true).await;
+            assert_eq!(report["issue_count"], 0, "{placement}: {report}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sheet_pin_geometry_checks_parent_even_when_child_is_missing() {
+        let report = validate(&handler().await, "(at 101.6 106.68 0)", false).await;
+        assert_eq!(report["issue_count"], 2, "{report}");
+        assert_eq!(report["issues"][0]["kind"], "pin_position_mismatch");
+        assert_eq!(report["issues"][1]["error"], "child file not found on disk");
+    }
+
+    #[tokio::test]
+    async fn sheet_pin_geometry_reports_a_rotation_that_names_no_edge() {
+        let report = validate(&handler().await, "(at 101.6 106.68 45)", true).await;
+        assert_eq!(report["issue_count"], 1, "{report}");
+        assert_eq!(report["issues"][0]["kind"], "invalid_pin_rotation");
+        assert_eq!(report["issues"][0]["stored_position"]["rotation"], 45.0);
+        assert!(report["issues"][0]["expected_edge"].is_null());
+    }
+}
+
+#[cfg(test)]
 mod component_properties_dispatch_tests {
     use super::*;
     use crate::tools::ServerConfig;
