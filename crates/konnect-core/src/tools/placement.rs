@@ -45,8 +45,8 @@ use crate::mcp::protocol::CallToolResult;
 use crate::tool;
 use crate::tools::{get_path, opt_positive_f64, with_board_ipc_classified, ToolContext, ToolDef};
 use konnect_sexp::board::{
-    board_outline_shape, footprint_courtyards, footprints, CourtyardSource,
-    FootprintCourtyard, OutlineShape, PcbConnectivityIndex, Side,
+    board_outline_shape, footprint_courtyards, footprints, CourtyardSource, FootprintCourtyard,
+    OutlineShape, PcbConnectivityIndex, Side,
 };
 use konnect_sexp::parser::SexpNode;
 use plan_status::PlanApplicability;
