@@ -3,6 +3,28 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: bounded schematic-transfer create groups (#658, terminal increment)
+
+`update_pcb_from_schematic` now sends creates in ordered groups of at most 32
+footprints. All groups and updates remain inside one recovery-enabled KiCad
+commit: successful publication produces one Undo entry. Applied counts are
+reported only after the whole transaction publishes. The first rejected,
+malformed or late response stops the apply; there is no automatic group retry
+or partial publication. Known failures drop the transaction; bounded late-reply
+recovery and unknown-outcome reporting remain as described below.
+
+This is an item-count bound, not a request-byte bound or a guarantee against
+KiCad listener limits/timeouts. There is no new input, general timeout setting,
+automatic publish-on-readback, or change to other creation tools.
+
+Live acceptance on KiCad 10.0.6 / Windows created 70 real-footprint instances
+in 32/32/6 groups, observed all references, and verified one native Undo restored
+the entire pre-apply serialized board. Redo restored the entire published state;
+a final Undo left the disposable board unchanged. The ignored regression is
+`sync_chunk_live_one_undo_restores_entire_board`; run it only with a disposable
+sole open board identified by `KONNECT_LIVE_CHUNK_BOARD`. Its native action names
+are version-specific test probes, not a new production API.
+
 ## Unreleased: unknown IPC outcomes (#658, first increment)
 
 A delivered IPC request whose receive fails, whose envelope cannot be decoded,
