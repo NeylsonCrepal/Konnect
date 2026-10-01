@@ -2040,6 +2040,57 @@ impl KiCadIpcClient {
         self.get_items_in(self.get_board_document()?, item_type)
     }
 
+    /// Read native item boxes for an exact document. Missing, duplicated or
+    /// unexpected IDs are not geometry evidence (KiCad omits unresolved IDs).
+    pub fn get_item_boxes_in(
+        &self,
+        document: kiapi::common::types::DocumentSpecifier,
+        ids: &[String],
+    ) -> Result<std::collections::BTreeMap<String, kiapi::common::types::Box2>> {
+        let expected: std::collections::BTreeSet<_> = ids.iter().cloned().collect();
+        anyhow::ensure!(
+            expected.len() == ids.len(),
+            "duplicate bounding-box request IDs"
+        );
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let command = kiapi::common::commands::GetBoundingBox {
+            header: Some(header_for(document)),
+            items: ids
+                .iter()
+                .map(|id| kiapi::common::types::Kiid { value: id.clone() })
+                .collect(),
+            mode: kiapi::common::commands::BoundingBoxMode::BbmItemOnly as i32,
+        };
+        let response = unpack_required::<kiapi::common::commands::GetBoundingBoxResponse>(
+            self.send_command(&command, "kiapi.common.commands.GetBoundingBox")?,
+            "GetBoundingBox",
+        )?;
+        anyhow::ensure!(
+            response.items.len() == ids.len() && response.boxes.len() == ids.len(),
+            "incomplete native bounding-box response"
+        );
+        let mut boxes = std::collections::BTreeMap::new();
+        for (id, bounds) in response.items.into_iter().zip(response.boxes) {
+            anyhow::ensure!(
+                expected.contains(&id.value),
+                "unexpected bounding-box ID {}",
+                id.value
+            );
+            let size = bounds.size.as_ref().context("bounding box missing size")?;
+            anyhow::ensure!(
+                bounds.position.is_some() && size.x_nm >= 0 && size.y_nm >= 0,
+                "invalid native bounding box"
+            );
+            anyhow::ensure!(
+                boxes.insert(id.value, bounds).is_none(),
+                "duplicate native bounding-box ID"
+            );
+        }
+        Ok(boxes)
+    }
+
     /// As [`Self::get_items`], targeting a specific open document.
     pub fn get_items_in(
         &self,
