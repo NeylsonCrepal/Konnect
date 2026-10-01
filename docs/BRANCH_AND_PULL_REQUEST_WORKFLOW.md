@@ -24,9 +24,10 @@ native GitHub merge queue are not available here yet.
 The repository therefore uses one explicit ordered queue rather than pretending
 that GitHub is sequencing PRs for us. One active `main: CI must pass` ruleset
 requires pull requests, all ten hosted checks, resolved review conversations,
-no force-push or deletion, and merge commits only. Auto-merge is enabled for a
-maintainer to arm after exact-head review, and merged topic branches are deleted
-automatically.
+current `main` in the head branch, no force-push or deletion, and merge commits
+only. A behind PR therefore cannot merge until its branch is updated and the ten
+checks rerun on the combined tree. Auto-merge is enabled for a maintainer to arm
+after exact-head review, and merged topic branches are deleted automatically.
 
 ## Review requests and completion
 
@@ -69,7 +70,7 @@ git switch -c fix/example upstream/main
 git push -u origin fix/example
 ```
 
-Open the pull request against `main`. Before final review:
+Open the pull request against `main`. Before its first final review:
 
 1. fetch `upstream`;
 2. rebase the branch onto current `upstream/main`;
@@ -83,6 +84,10 @@ maintainer explicitly requests a backport to that release line.
 Do not stack independent changes merely because one contributor is developing
 them at the same time. Separate branches let either change merge, wait, or be
 abandoned without moving the other.
+
+If `main` advances after that review, do not immediately repeat this sequence.
+The queue refreshes only the next-to-land PR under
+[Maintainer refresh of a clean behind branch](#maintainer-refresh-of-a-clean-behind-branch).
 
 ## Dependent changes: expose one mergeable step at a time
 
@@ -178,6 +183,41 @@ A PR is merge-ready only when all of the following are true:
 
 A PR is not merge-ready merely because an earlier cumulative head was green.
 
+## Maintainer refresh of a clean behind branch
+
+When the next-to-land PR is only behind current `main`, a maintainer may refresh
+the contributor branch instead of sending it back for a mechanical rebase. This
+path applies only when all of the following are true:
+
+- the PR is next in the documented merge order;
+- GitHub reports no merge conflict;
+- the commit list and diff contain only the PR's unique work;
+- the contributor permits maintainer edits; and
+- no unresolved finding requires the author to change the implementation.
+
+Record the current head SHA and current `upstream/main`, then use the rebase form:
+
+```text
+gh pr update-branch N --rebase
+```
+
+The ordinary update command creates a merge commit in the contributor branch;
+Konnect uses `--rebase` for its focused branches. Refreshing rewrites the head
+and invalidates earlier readiness. Afterward:
+
+1. verify the new commit list and diff still contain only the same unique work;
+2. compare the old and new unique commits or patches and investigate any
+   substantive difference;
+3. wait for all ten required checks on the new head; and
+4. record an exact-head review before applying `status:ready-to-merge` or
+   enabling auto-merge.
+
+When the semantic diff is unchanged, this can be a focused refresh review that
+references the completed substantive review and the current-main CI. It does not
+require repeating every original test or review step. A conflict, changed unique
+diff, failed check, disabled maintainer edits or copied prerequisite history is
+real work: set the appropriate status and return it to the author.
+
 ## Merge execution loop
 
 The next actor is represented by exactly one workflow label:
@@ -190,20 +230,23 @@ The next actor is represented by exactly one workflow label:
 
 For the one next-to-land PR in an overlap set:
 
-1. A maintainer verifies the head SHA, focused diff, dependency position,
+1. If the branch is behind, apply the clean maintainer refresh above or return
+   conflicts/cumulative history to the author. Do not refresh deeper queued PRs.
+2. A maintainer verifies the head SHA, focused diff, dependency position,
    issue-closing references, evidence, and every resolved review conversation.
-2. If something remains, the maintainer applies the label for the actual next
+3. If something remains, the maintainer applies the label for the actual next
    actor and leaves auto-merge off.
-3. If the PR is ready but required checks are still running, the maintainer
+4. If the PR is ready but required checks are still running, the maintainer
    applies `status:ready-to-merge` and enables auto-merge with the merge-commit
    method. If all requirements are already satisfied, the maintainer may merge
    immediately with `gh pr merge N --merge` after the same verification.
-4. A new commit, rewritten head, base change, failed or missing required check,
+5. A new commit, rewritten head, base change, failed or missing required check,
    or unresolved conversation returns the PR to review. Recheck the new exact
    head before arming auto-merge again.
-5. After GitHub merges it, update local `main`, run the complete gate from
-   `GOVERNANCE.md`, verify terminal issue closure, post the acceptance mapping,
-   and only then promote or reconstruct the immediate successor.
+6. After GitHub merges it, update local `main`, verify terminal issue closure,
+   post the acceptance mapping, and only then promote the immediate successor.
+   Run the complete local gate only under the conditional rules in
+   `GOVERNANCE.md`.
 
 Auto-merge removes waiting time; it does not relax admission control, review,
 CI, or the one-next-PR rule. Until Konnect moves to an organization with a
@@ -212,9 +255,10 @@ GitHub chooses a safe order.
 
 ## Responsibilities when `main` moves
 
-The PR author owns synchronizing the branch and resolving its conflicts. A
-maintainer may help, but branch reconstruction is not a standing maintainer
-service.
+The queue owner refreshes the next-to-land PR when it qualifies for the clean
+maintainer path above. The PR author owns resolving conflicts, repairing failed
+checks and reconstructing cumulative or misleading history. A maintainer may
+help with that work, but branch reconstruction is not a standing service.
 
 When a stale PR contains copied prerequisite commits, the preferred correction
 is to reconstruct it from current `main` with only its unique commits. A
@@ -222,8 +266,9 @@ maintainer may return the PR to draft or request reconstruction instead of
 reviewing a misleading cumulative diff.
 
 Do not repeatedly rebase a deep series after every unrelated merge. Wait until
-the immediate prerequisite lands, then rebuild the next PR once. This keeps the
-queue moving while minimizing conflict work for contributors and reviewers.
+the immediate prerequisite lands, then refresh or rebuild the next PR once.
+This keeps the queue moving while minimizing conflict work for contributors and
+reviewers.
 
 ## Issue closure in a series
 

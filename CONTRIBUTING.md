@@ -15,6 +15,10 @@ Thanks for your interest! Bug reports, feature requests, and pull requests are w
 - Follow the [branch and pull request workflow](docs/BRANCH_AND_PULL_REQUEST_WORKFLOW.md).
   Independent changes branch from current `upstream/main`; dependent work exposes one
   mergeable step at a time instead of opening cumulative PRs against the same old base.
+- For a pull request from a fork, leave **Allow edits by maintainers** enabled for the
+  PR branch. This lets a maintainer perform the one clean rebase needed when the PR
+  reaches the front of the queue; conflicts and substantive changes still return to
+  the author. If maintainer edits cannot be enabled, the author owns that refresh.
 - Keep the PR's workflow state honest. A maintainer uses one `status:*` label to name
   the next actor; `status:ready-to-merge` means the exact current head has completed
   review, not merely that the author considers it finished.
@@ -106,10 +110,14 @@ GitHub's native merge queue is not available in this ownership model, so the doc
 landing order and `status:*` labels are the queue.
 
 The repository requires a pull request, all ten hosted checks, resolved review
-conversations, and the merge-commit method. Once a maintainer has reviewed the exact
-head and marked it `status:ready-to-merge`, they may enable auto-merge while checks are
-finishing. Auto-merge is the last execution step; it is not review and does not make a
-stale, cumulative, or poorly evidenced PR ready.
+conversations, an up-to-date branch, and the merge-commit method. GitHub enforces that
+the branch includes current `main`. When a reviewed PR reaches the front of the queue
+and is merely behind, a maintainer may update it with rebase and let hosted CI rerun;
+the contributor is needed for conflicts, copied prerequisite history, failed checks or
+substantive changes. Once a maintainer has reviewed the refreshed exact head and marked
+it `status:ready-to-merge`, they may enable auto-merge while checks are finishing.
+Auto-merge is the last execution step; it is not review and does not make a cumulative
+or poorly evidenced PR ready.
 
 CODEOWNERS may automatically request Chris's review even when another maintainer
 handles the routine review. That request is a notification, not an extra approval
@@ -118,10 +126,11 @@ explains how the maintainer records a completed review and clears only a stale
 automatic request; it never dismisses a specific owner decision or review finding.
 
 If you push after that review, assume the readiness decision is invalid. GitHub may
-disable auto-merge automatically for a new commit from a fork. Resolve new feedback,
-bring the branch back to current `upstream/main` when required, rerun the evidence, and
-wait for review of the new head. After merge, GitHub deletes the topic branch
-automatically; retain any later dependent work on its own branch.
+disable auto-merge automatically for a new commit from a fork. Resolve new feedback
+and wait for review of the new head. If only `main` moved after review, wait until the
+PR reaches the front of the queue: a maintainer can perform a clean update then. After
+merge, GitHub deletes the topic branch automatically; retain any later dependent work
+on its own branch.
 
 You do not need personal access to every supported operating system, KiCad
 version, or hardware configuration. For an environment-dependent check you
@@ -147,8 +156,10 @@ These are exactly the commands CI runs — if they pass locally, CI should be gr
 - `cargo fmt --all -- --check` is clean
 - The branch includes current `upstream/main`, GitHub reports no conflicts, and the
   required checks passed on the exact head being reviewed
-- Every review conversation is resolved; a post-review commit or base change requires
-  review of the new exact head before auto-merge is armed again
+- Every review conversation is resolved; a post-review commit or base refresh requires
+  review of the new exact head before auto-merge is armed again. An unchanged unique
+  diff may receive a focused refresh review; changed behavior requires substantive
+  re-review
 - The commit list and diff contain only this PR's unique work; dependencies and stack
   position are explicit
 - New names follow [the naming conventions](docs/NAMING_CONVENTIONS.md); public name
