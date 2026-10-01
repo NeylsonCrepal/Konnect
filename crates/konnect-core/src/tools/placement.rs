@@ -232,6 +232,9 @@ async fn handle_score_placement(
         Err(konnect_ipc::IpcFailure::Rejected(message)) => {
             return Ok(CallToolResult::error(message));
         }
+        Err(konnect_ipc::IpcFailure::Uncertain(message)) => {
+            return Ok(crate::tools::ipc_uncertain_result(&message));
+        }
     };
     let tree = konnect_sexp::parse_sexp(&content)?;
 

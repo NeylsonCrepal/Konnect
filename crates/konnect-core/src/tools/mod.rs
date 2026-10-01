@@ -534,6 +534,18 @@ where
     }
 }
 
+/// Unknown is not a rejection or evidence of no mutation. Never advise a blind retry.
+pub(crate) fn ipc_uncertain_result(message: &str) -> CallToolResult {
+    CallToolResult::error_kind(
+        crate::mcp::error::ToolErrorKind::IpcOutcomeUnknown {
+            board_state: "unknown".to_string(),
+            retry_safe: false,
+            reason: message.to_string(),
+        },
+        format!("{message}. Do not repeat the mutation or edit the saved file. Inspect the requested live board and reconcile any applied work before retrying. Automatic recovery has not been established."),
+    )
+}
+
 /// Run a board-targeted IPC call and remember the requested board as soon as
 /// KiCad positively identifies it. Observation happens before `f`, so a later
 /// command rejection, timeout, or editor crash cannot make the next file

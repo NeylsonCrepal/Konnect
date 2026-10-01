@@ -3,6 +3,28 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: unknown IPC outcomes (#658, first increment)
+
+A delivered IPC request whose receive fails, whose envelope cannot be decoded,
+or whose status is missing is no longer reported as a KiCad rejection. A failed
+transaction rollback also makes the outcome unknown and preserves the original
+error. Shared live-board reads/writes return an error with
+`error.kind: ipc_outcome_unknown`, `error.board_state: unknown`,
+`error.retry_safe: false`, and `error.reason`. `update_pcb_from_schematic`
+preserves this error instead of converting it to a preflight `conflict`.
+
+Do not retry a mutation or edit the saved file on this result. Inspect and
+reconcile the requested live board first: some or all of the mutation may have
+been applied. Konnect does not send a blind transaction drop after an uncertain
+operation or publish. The diagnostic includes the known commit identifier, but
+does not claim a successful rollback. Known API refusals retain their existing
+classification and ordinary failed batches still attempt a drop.
+
+This increment does not implement automatic bounded recovery, chunk schematic
+transfers, or prove live one-step undo for chunking. Those remain tracked in
+#658; the issue is not closed by the first safety PR. No general timeout setting
+or new tool is introduced.
+
 ## Unreleased: sheet-pin geometry findings
 
 `validate_sheet_pins` keeps its read-only `issue_count` / `issues` response,

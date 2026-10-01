@@ -991,6 +991,140 @@ fn failed_multi_step_commit_is_dropped() {
     );
 }
 
+#[test]
+fn uncertain_batch_does_not_send_a_blind_drop_or_publish() {
+    let commands = Arc::new(Mutex::new(Vec::new()));
+    let observed = commands.clone();
+    let mock = spawn_mock(move |request| {
+        let message = request.message.unwrap();
+        observed.lock().unwrap().push(message.type_url.clone());
+        if message.type_url.ends_with("BeginCommit") {
+            Some(reply_with(builders::pack_any(
+                &kiapi::common::commands::BeginCommitResponse {
+                    id: Some(kiapi::common::types::Kiid {
+                        value: "uncertain-commit".into(),
+                    }),
+                },
+                "kiapi.common.commands.BeginCommitResponse",
+            )))
+        } else {
+            Some(reply_with(builders::pack_any(
+                &kiapi::common::commands::EndCommitResponse {},
+                "kiapi.common.commands.EndCommitResponse",
+            )))
+        }
+    });
+    let error = KiCadIpcClient::new(&mock.url)
+        .run_commit::<()>("uncertain", |_| {
+            Err(anyhow::Error::new(konnect_ipc::client::IpcOutcomeUnknown {
+                command: "CreateItems".into(),
+                reason: "receive timed out".into(),
+            })
+            .context("original operation"))
+        })
+        .unwrap_err();
+    let failure = konnect_ipc::IpcFailure::from_error(error);
+    assert!(
+        matches!(failure, konnect_ipc::IpcFailure::Uncertain(_)),
+        "{failure:?}"
+    );
+    assert!(failure.message().contains("uncertain-commit"));
+    assert!(failure.message().contains("original operation"));
+    let observed = commands.lock().unwrap();
+    assert_eq!(
+        observed.len(),
+        1,
+        "no EndCommit after uncertain mutation: {observed:?}"
+    );
+}
+
+#[test]
+fn failed_drop_keeps_original_error_and_reports_unknown() {
+    let mock = spawn_mock(|request| {
+        let message = request.message.unwrap();
+        if message.type_url.ends_with("BeginCommit") {
+            Some(reply_with(builders::pack_any(
+                &kiapi::common::commands::BeginCommitResponse {
+                    id: Some(kiapi::common::types::Kiid {
+                        value: "failed-drop".into(),
+                    }),
+                },
+                "kiapi.common.commands.BeginCommitResponse",
+            )))
+        } else {
+            Some(kiapi::common::ApiResponse {
+                status: Some(kiapi::common::ApiResponseStatus {
+                    status: kiapi::common::ApiStatusCode::AsBadRequest as i32,
+                    error_message: "drop refused".into(),
+                }),
+                ..ok_response()
+            })
+        }
+    });
+    let error = KiCadIpcClient::new(&mock.url)
+        .run_commit::<()>("failed", |_| anyhow::bail!("original create failure"))
+        .unwrap_err();
+    let failure = konnect_ipc::IpcFailure::from_error(error);
+    assert!(
+        matches!(failure, konnect_ipc::IpcFailure::Uncertain(_)),
+        "{failure:?}"
+    );
+    assert!(failure.message().contains("original create failure"));
+    assert!(failure.message().contains("drop refused"));
+}
+
+#[test]
+fn uncertain_publish_is_not_followed_by_drop_and_success_publishes_once() {
+    for uncertain_publish in [false, true] {
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let observed = actions.clone();
+        let mock = spawn_mock(move |request| {
+            let message = request.message.unwrap();
+            if message.type_url.ends_with("BeginCommit") {
+                Some(reply_with(builders::pack_any(
+                    &kiapi::common::commands::BeginCommitResponse {
+                        id: Some(kiapi::common::types::Kiid {
+                            value: "publish-commit".into(),
+                        }),
+                    },
+                    "kiapi.common.commands.BeginCommitResponse",
+                )))
+            } else {
+                let command =
+                    kiapi::common::commands::EndCommit::decode(message.value.as_slice()).unwrap();
+                observed.lock().unwrap().push(command.action());
+                if uncertain_publish {
+                    Some(kiapi::common::ApiResponse {
+                        status: None,
+                        header: None,
+                        message: None,
+                    })
+                } else {
+                    Some(reply_with(builders::pack_any(
+                        &kiapi::common::commands::EndCommitResponse {},
+                        "kiapi.common.commands.EndCommitResponse",
+                    )))
+                }
+            }
+        });
+        let result = KiCadIpcClient::new(&mock.url).run_commit("publish", |_| Ok(42));
+        if uncertain_publish {
+            let failure = konnect_ipc::IpcFailure::from_error(result.unwrap_err());
+            assert!(
+                matches!(failure, konnect_ipc::IpcFailure::Uncertain(_)),
+                "{failure:?}"
+            );
+            assert!(failure.message().contains("publish-commit"));
+        } else {
+            assert_eq!(result.unwrap(), 42);
+        }
+        assert_eq!(
+            *actions.lock().unwrap(),
+            vec![kiapi::common::commands::CommitAction::CmaCommit]
+        );
+    }
+}
+
 // ─── IpcFailure classification ────────────────────────────────────────────────
 //
 // The file-editing fallback in konnect-core is gated on this classification:

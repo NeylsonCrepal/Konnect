@@ -172,6 +172,7 @@ where
 
     Ok(match live_board::observe(ctx, board_path, f).await? {
         LiveBoard::Answered(value) => BoardRead::Live(value),
+        LiveBoard::Uncertain(message) => BoardRead::Refused(super::ipc_uncertain_result(&message)),
 
         // KiCad is on the other end and refused the request, or never finished
         // answering it. Nothing here explains the live board away, so the saved

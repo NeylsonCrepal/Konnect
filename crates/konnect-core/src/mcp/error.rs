@@ -133,6 +133,12 @@ pub enum ToolErrorKind {
     /// Catch-all for handler `anyhow::Error` that hasn't been migrated yet.
     /// Eventually each variant above subsumes a subset of these.
     HandlerError { reason: String },
+    /// A delivered IPC request has no confirmed outcome. Retrying may duplicate work.
+    IpcOutcomeUnknown {
+        board_state: String,
+        retry_safe: bool,
+        reason: String,
+    },
 }
 
 impl ToolErrorKind {
@@ -161,6 +167,7 @@ impl ToolErrorKind {
             Self::AmbiguousOpenBoard { .. } => "ambiguous_open_board",
             Self::InvalidConfiguration { .. } => "invalid_configuration",
             Self::HandlerError { .. } => "handler_error",
+            Self::IpcOutcomeUnknown { .. } => "ipc_outcome_unknown",
         }
     }
 }
