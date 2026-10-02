@@ -35,6 +35,39 @@ fn release_publication_requires_real_kicad_acceptance() {
 }
 
 #[test]
+fn release_workflow_has_a_non_publishing_pre_tag_entry_point() {
+    let release = workflow("release.yml");
+
+    assert!(
+        release["on"].get("workflow_dispatch").is_some(),
+        "maintainers need to exercise the release graph before creating a tag"
+    );
+    assert_eq!(
+        release["jobs"]["release"]["if"],
+        "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')",
+        "a manual release smoke run must never publish a GitHub release"
+    );
+}
+
+#[test]
+fn workflows_do_not_depend_on_node20_setup_protoc() {
+    for name in ["ci.yml", "e2e-kicad.yml", "release.yml"] {
+        let source =
+            std::fs::read_to_string(repository_root().join(".github/workflows").join(name))
+                .unwrap_or_else(|error| panic!("failed to read {name}: {error}"));
+
+        assert!(
+            !source.contains("arduino/setup-protoc"),
+            "{name} must not reintroduce the Node-20 setup-protoc action"
+        );
+        assert!(
+            source.contains("tool: protoc@3.23.4") && source.contains("fallback: none"),
+            "{name} must install the reviewed protoc version without an unreviewed fallback"
+        );
+    }
+}
+
+#[test]
 fn real_kicad_workflow_remains_reusable_and_opt_in_for_pull_requests() {
     let e2e = workflow("e2e-kicad.yml");
 

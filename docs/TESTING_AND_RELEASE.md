@@ -79,6 +79,12 @@ workflow remains separate because it installs KiCad and is not an ordinary
 per-PR gate. Apply the `run:e2e-kicad` label to run that same workflow for a
 pull request when KiCad-facing behavior needs hosted acceptance evidence.
 
+Before creating a release tag, dispatch `.github/workflows/release.yml` against
+the exact candidate ref. The manual entry point runs the release-profile target
+matrix, all three PCM package builds, and the reusable real-KiCad acceptance
+workflow with a synthetic `0.0.0` package version. Its publication job is
+tag-only, so this pre-tag smoke run cannot create a GitHub release.
+
 On a release tag, `.github/workflows/release.yml` calls
 `.github/workflows/e2e-kicad.yml` as a reusable workflow. The called workflow
 checks out the caller's exact tag commit. The `Create Release` job depends on
