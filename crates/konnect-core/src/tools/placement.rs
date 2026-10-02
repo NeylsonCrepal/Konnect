@@ -132,22 +132,24 @@ pub fn tools() -> Vec<ToolDef> {
         .with_board_access(crate::tools::BoardAccess::ApplyModeDependent),
         tool!(
             "auto_place_from_schematic",
-            "Deterministic first placement: cluster footprints by shared nets (union-find), \
+            "DEPRECATED diagnostic first-placement plan: cluster footprints by shared nets (union-find), \
              lay clusters out as tight grids inside the board outline, courtyards \
              non-overlapping. Footprints locked in KiCad are never moved and act as obstacles; add more with 'locked'. A starting point for refinement, not a final layout — the \
-             response says so, and carries the board's score before and after the plan. \
+             response says so, carries the board's score before and after the plan, and \
+             reports plan_status 'blocked' because autonomous whole-board mutation is retired. \
+             dry_run: false returns a structured plan_blocked error and never writes; use \
+             bounded explicit move_component calls with exact-board readback instead. \
              Refuses (regardless of dry_run) when the board outline is not provably an \
              axis-aligned rectangle — a concave, notched, rounded, rotated, or multi-boundary \
              outline cannot back a containment proof; validate the saved board with KiCad DRC \
-             and make small explicit single-part moves instead. \
-             Dry-run by default.",
+             and make small explicit single-part moves instead.",
             json!({
                 "type": "object",
                 "properties": {
                     "board": { "type": "string", "description": "Path to .kicad_pcb file" },
                     "margin_mm": { "type": "number", "default": 2.0, "description": "Clearance from the board outline" },
                     "locked": { "type": "array", "items": { "type": "string" }, "description": "Additional references that must not move. Footprints KiCad itself marks locked are always held, without needing to be listed here." },
-                    "dry_run": { "type": "boolean", "default": true }
+                    "dry_run": { "type": "boolean", "default": true, "description": "Compatibility selector. Only true is supported; false returns plan_blocked without writing." }
                 },
                 "required": ["board"]
             }),
@@ -369,8 +371,13 @@ async fn handle_score_placement(
     }
 
     // ── Decoupling check (C* near a shared-net U*) ──────────────────────────
-    let (decoupling_violations, uncoupled_caps, interface_filter_caps) =
-        decoupling_check(&scan.items, &index, &values);
+    let DecouplingCheck {
+        violations: decoupling_violations,
+        uncoupled_caps,
+        interface_filter_caps,
+        associations: decoupling_associations,
+        unproven_caps: unproven_decoupling_caps,
+    } = decoupling_check(&scan.items, &index, &values);
 
     // ── Soft score (ported weight table — see the module docs) ──────────────
     let overlap_deduction = (overlap_pairs as i64 * OVERLAP_POINTS).min(OVERLAP_CAP);
@@ -428,8 +435,14 @@ async fn handle_score_placement(
             "detail": decoupling_violations
                 .iter()
                 .map(|v| format!(
-                    "{} ({}, limit {} mm) is {} mm from nearest shared-net IC {}",
-                    v.cap, v.value, v.limit_mm, round3(v.distance_mm), v.ic,
+                    "{} ({}, limit {} mm) is {} mm from IC {} via {} ({} references)",
+                    v.cap,
+                    v.value,
+                    v.limit_mm,
+                    round3(v.distance_mm),
+                    v.ic,
+                    v.qualifying_net,
+                    v.net_reference_count,
                 ))
                 .collect::<Vec<_>>()
                 .join("; "),
@@ -463,6 +476,27 @@ async fn handle_score_placement(
         "deductions": deductions,
         "connector_edges": connector_edges,
         "uncoupled_caps": uncoupled_caps,
+        "unproven_decoupling_caps": unproven_decoupling_caps
+            .iter()
+            .map(|cap| json!({
+                "reference": cap.cap,
+                "value": cap.value,
+                "reason": cap.reason,
+            }))
+            .collect::<Vec<_>>(),
+        "decoupling_associations": decoupling_associations
+            .iter()
+            .map(|association| json!({
+                "reference": association.cap,
+                "value": association.value,
+                "ic": association.ic,
+                "qualifying_net": association.qualifying_net,
+                "net_reference_count": association.net_reference_count,
+                "distance_mm": round3(association.distance_mm),
+                "limit_mm": association.limit_mm,
+                "status": association.status,
+            }))
+            .collect::<Vec<_>>(),
         "interface_filter_caps": interface_filter_caps
             .iter()
             .map(|f| json!({
@@ -1218,6 +1252,11 @@ async fn handle_auto_place(
     let score_before = score_of_content(ctx, &content).await?;
     let planned_content = apply_placements_to_content(&content, &placements)?;
     let score_after = score_of_content(ctx, &planned_content).await?;
+    let mut applicability = PlanApplicability::new();
+    applicability.block(
+        "autonomous whole-board mutation is retired; inspect this diagnostic plan, then use bounded explicit move_component calls with exact-board readback",
+    );
+    let (plan_status, blocking_reasons) = applicability.to_json();
 
     let cluster_report: Vec<serde_json::Value> = clusters
         .values()
@@ -1244,7 +1283,11 @@ async fn handle_auto_place(
     if dry_run {
         return Ok(CallToolResult::json(&json!({
             "dry_run": true,
+            "applied": false,
             "note": "a starting point for refinement, not a final layout",
+            "source": "saved_file",
+            "plan_status": plan_status,
+            "blocking_reasons": blocking_reasons,
             "clusters": cluster_report,
             "planned_moves": planned_moves,
             "held": held_report.clone(),
@@ -1254,28 +1297,17 @@ async fn handle_auto_place(
         })));
     }
 
-    if let Some(refusal) =
-        super::pcb_board::refuse_if_board_open_in_kicad(ctx, &board, "auto_place_from_schematic")
-            .await?
-    {
-        return Ok(refusal);
-    }
-    let applied = match super::pcb_components::update_closed_board_footprints(&board, &placements) {
-        Ok(applied) => applied,
-        Err(error) => return Ok(error.into_result()),
-    };
-    let written = konnect_sexp::writer::read_consistent(&board)?;
-    let score_written = score_of_content(ctx, &written).await?;
-    Ok(CallToolResult::json(&json!({
-        "dry_run": false,
-        "note": "a starting point for refinement, not a final layout",
-        "clusters": cluster_report,
-        "applied_count": applied.len(),
-        "held": held_report,
-        "score_before": score_before["score"],
-        "score_after": score_written["score"],
-        "verdict_after": score_written["verdict"],
-    })))
+    let reasons = applicability.blocking_reasons().to_vec();
+    Ok(CallToolResult::error_kind(
+        ToolErrorKind::PlanBlocked {
+            operation: "auto_place_from_schematic".into(),
+            reasons: reasons.clone(),
+        },
+        format!(
+            "auto_place_from_schematic refuses to apply a blocked plan: {}",
+            reasons.join("; ")
+        ),
+    ))
 }
 
 // ─── refine_placement_force_directed ─────────────────────────────────────────
@@ -1754,8 +1786,40 @@ struct DecouplingViolation {
     cap: String,
     value: String,
     ic: String,
+    qualifying_net: String,
+    net_reference_count: usize,
     distance_mm: f64,
     limit_mm: f64,
+}
+
+/// Evidence behind one capacitor-to-IC association. The scorer may deduct
+/// only when this evidence exists; a board-wide ground rail alone is not an
+/// electrical relationship between a particular capacitor and IC.
+struct DecouplingAssociation {
+    cap: String,
+    value: String,
+    ic: String,
+    qualifying_net: String,
+    net_reference_count: usize,
+    distance_mm: f64,
+    limit_mm: f64,
+    status: &'static str,
+}
+
+/// A family-classified capacitor for which the scorer cannot prove which IC,
+/// if any, it decouples. Unproved evidence is reported and never scored.
+struct UnprovenDecouplingCap {
+    cap: String,
+    value: String,
+    reason: String,
+}
+
+struct DecouplingCheck {
+    violations: Vec<DecouplingViolation>,
+    uncoupled_caps: Vec<String>,
+    interface_filter_caps: Vec<InterfaceFilterCap>,
+    associations: Vec<DecouplingAssociation>,
+    unproven_caps: Vec<UnprovenDecouplingCap>,
 }
 
 /// One capacitor exempted from the decoupling rule because it sits on the
@@ -1794,11 +1858,7 @@ fn decoupling_check(
     items: &[FootprintCourtyard],
     index: &PcbConnectivityIndex,
     values: &HashMap<String, String>,
-) -> (
-    Vec<DecouplingViolation>,
-    Vec<String>,
-    Vec<InterfaceFilterCap>,
-) {
+) -> DecouplingCheck {
     // Net set per reference, from the connectivity index — keyed by name, so
     // both file formats resolve identically.
     let mut nets_by_ref: HashMap<&str, BTreeSet<&str>> = HashMap::new();
@@ -1806,12 +1866,17 @@ fn decoupling_check(
     // faces of the board — what decides whether a part on the far face is
     // electrically on these pins or only above them.
     let mut through_nets_by_ref: HashMap<&str, BTreeSet<&str>> = HashMap::new();
+    let mut references_by_net: HashMap<&str, BTreeSet<&str>> = HashMap::new();
     for net in index.nets() {
         for pad in index.pads_of_net(net) {
             nets_by_ref
                 .entry(pad.reference.as_str())
                 .or_default()
                 .insert(net);
+            references_by_net
+                .entry(net)
+                .or_default()
+                .insert(pad.reference.as_str());
             if pad.reaches_both_faces {
                 through_nets_by_ref
                     .entry(pad.reference.as_str())
@@ -1832,6 +1897,8 @@ fn decoupling_check(
     let mut violations = Vec::new();
     let mut uncoupled = Vec::new();
     let mut interface_filters = Vec::new();
+    let mut associations = Vec::new();
+    let mut unproven = Vec::new();
     for c in items {
         let Some(reference) = c.reference.as_deref() else {
             continue;
@@ -1847,10 +1914,39 @@ fn decoupling_check(
         };
         let cap_nets = nets_by_ref.get(reference);
         let center = bbox_center(c.bbox);
-        match nearest_shared_net(&ics, cap_nets, &nets_by_ref, center) {
-            None => uncoupled.push(reference.to_string()),
-            Some((ic, distance_mm)) => {
+        match nearest_decoupling_association(
+            &ics,
+            cap_nets,
+            &nets_by_ref,
+            &references_by_net,
+            center,
+        ) {
+            None => {
+                uncoupled.push(reference.to_string());
+                unproven.push(UnprovenDecouplingCap {
+                    cap: reference.to_string(),
+                    value: value.clone(),
+                    reason: unproven_decoupling_reason(
+                        cap_nets,
+                        &ics,
+                        &nets_by_ref,
+                        &references_by_net,
+                    ),
+                });
+            }
+            Some(association) => {
+                let distance_mm = association.distance_mm;
                 if distance_mm <= limit_mm {
+                    associations.push(DecouplingAssociation {
+                        cap: reference.to_string(),
+                        value: value.clone(),
+                        ic: association.ic,
+                        qualifying_net: association.qualifying_net,
+                        net_reference_count: association.net_reference_count,
+                        distance_mm,
+                        limit_mm,
+                        status: "within_limit",
+                    });
                     continue;
                 }
                 // The cap is too far from the IC it shares a rail with. Before
@@ -1876,20 +1972,50 @@ fn decoupling_check(
                             connector: connector.to_string(),
                             distance_mm: connector_distance_mm,
                             limit_mm,
-                        })
+                        });
+                        associations.push(DecouplingAssociation {
+                            cap: reference.to_string(),
+                            value: value.clone(),
+                            ic: association.ic,
+                            qualifying_net: association.qualifying_net,
+                            net_reference_count: association.net_reference_count,
+                            distance_mm,
+                            limit_mm,
+                            status: "interface_filter",
+                        });
                     }
-                    None => violations.push(DecouplingViolation {
-                        cap: reference.to_string(),
-                        value: value.clone(),
-                        ic: ic.to_string(),
-                        distance_mm,
-                        limit_mm,
-                    }),
+                    None => {
+                        violations.push(DecouplingViolation {
+                            cap: reference.to_string(),
+                            value: value.clone(),
+                            ic: association.ic.clone(),
+                            qualifying_net: association.qualifying_net.clone(),
+                            net_reference_count: association.net_reference_count,
+                            distance_mm,
+                            limit_mm,
+                        });
+                        associations.push(DecouplingAssociation {
+                            cap: reference.to_string(),
+                            value: value.clone(),
+                            ic: association.ic,
+                            qualifying_net: association.qualifying_net,
+                            net_reference_count: association.net_reference_count,
+                            distance_mm,
+                            limit_mm,
+                            status: "too_far",
+                        });
+                    }
                 }
             }
         }
     }
-    (violations, uncoupled, interface_filters)
+    DecouplingCheck {
+        violations,
+        uncoupled_caps: uncoupled,
+        interface_filter_caps: interface_filters,
+        associations,
+        unproven_caps: unproven,
+    }
 }
 
 /// Footprints whose reference designator carries `prefix` exactly, paired with
@@ -1908,26 +2034,108 @@ fn footprints_with_prefix<'a>(
         .collect()
 }
 
-/// The nearest candidate that shares at least one named net with the cap, and
-/// how far its courtyard bbox is from the cap's center. `None` when no
-/// candidate shares a net.
-fn nearest_shared_net<'a, 'n>(
-    candidates: &[(&'a str, Bbox)],
+const MAX_DECOUPLING_NET_REFERENCES: usize = 8;
+
+struct DecouplingMatch {
+    ic: String,
+    qualifying_net: String,
+    net_reference_count: usize,
+    distance_mm: f64,
+}
+
+fn is_ground_like_net(net: &str) -> bool {
+    let normalized = net
+        .trim()
+        .trim_start_matches('/')
+        .to_ascii_uppercase()
+        .replace(['-', '_'], "");
+    normalized == "0"
+        || normalized == "0V"
+        || normalized.starts_with("GND")
+        || normalized.ends_with("GND")
+        || normalized.starts_with("VSS")
+}
+
+/// Find the nearest IC with evidence stronger than a board-wide rail: at
+/// least one shared, non-ground net whose distinct-reference fanout remains
+/// small enough to identify a local functional relationship.
+fn nearest_decoupling_association<'n>(
+    candidates: &[(&str, Bbox)],
     cap_nets: Option<&BTreeSet<&'n str>>,
     nets_by_ref: &HashMap<&str, BTreeSet<&'n str>>,
+    references_by_net: &HashMap<&'n str, BTreeSet<&str>>,
     center: (f64, f64),
-) -> Option<(&'a str, f64)> {
+) -> Option<DecouplingMatch> {
+    let cap_nets = cap_nets?;
     candidates
         .iter()
-        .filter(|(reference, _)| {
-            // Shares at least one named net with this cap.
-            match (cap_nets, nets_by_ref.get(*reference)) {
-                (Some(a), Some(b)) => !a.is_disjoint(b),
-                _ => false,
-            }
+        .filter_map(|(reference, bbox)| {
+            let ic_nets = nets_by_ref.get(*reference)?;
+            let (qualifying_net, net_reference_count) = cap_nets
+                .intersection(ic_nets)
+                .filter(|net| !is_ground_like_net(net))
+                .filter_map(|net| {
+                    let fanout = references_by_net.get(net)?.len();
+                    (fanout <= MAX_DECOUPLING_NET_REFERENCES).then_some((*net, fanout))
+                })
+                .min_by(|(net_a, fanout_a), (net_b, fanout_b)| {
+                    fanout_a.cmp(fanout_b).then_with(|| net_a.cmp(net_b))
+                })?;
+            Some(DecouplingMatch {
+                ic: (*reference).to_string(),
+                qualifying_net: qualifying_net.to_string(),
+                net_reference_count,
+                distance_mm: distance_to_bbox(center, *bbox),
+            })
         })
-        .map(|(reference, bbox)| (*reference, distance_to_bbox(center, *bbox)))
-        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .min_by(|a, b| {
+            a.distance_mm
+                .total_cmp(&b.distance_mm)
+                .then_with(|| a.net_reference_count.cmp(&b.net_reference_count))
+                .then_with(|| a.ic.cmp(&b.ic))
+        })
+}
+
+fn unproven_decoupling_reason<'n>(
+    cap_nets: Option<&BTreeSet<&'n str>>,
+    candidates: &[(&str, Bbox)],
+    nets_by_ref: &HashMap<&str, BTreeSet<&'n str>>,
+    references_by_net: &HashMap<&'n str, BTreeSet<&str>>,
+) -> String {
+    let Some(cap_nets) = cap_nets else {
+        return "the capacitor has no named pad nets".into();
+    };
+    let non_ground: Vec<&str> = cap_nets
+        .iter()
+        .copied()
+        .filter(|net| !is_ground_like_net(net))
+        .collect();
+    if non_ground.is_empty() {
+        return "the capacitor exposes only ground-like nets; ground alone does not identify an IC"
+            .into();
+    }
+    let bounded: Vec<&str> = non_ground
+        .iter()
+        .copied()
+        .filter(|net| {
+            references_by_net
+                .get(net)
+                .is_some_and(|references| references.len() <= MAX_DECOUPLING_NET_REFERENCES)
+        })
+        .collect();
+    if bounded.is_empty() {
+        return format!(
+            "every non-ground net exceeds the conservative fanout limit of {MAX_DECOUPLING_NET_REFERENCES} references"
+        );
+    }
+    if candidates.iter().all(|(reference, _)| {
+        nets_by_ref
+            .get(*reference)
+            .is_none_or(|ic_nets| bounded.iter().all(|net| !ic_nets.contains(net)))
+    }) {
+        return "no IC shares a non-ground, low-fanout rail with the capacitor".into();
+    }
+    "no conservative capacitor-to-IC association could be proved".into()
 }
 
 /// The nearest connector this capacitor is filtering for, and how far its
@@ -2176,6 +2384,23 @@ mod tests {
         );
         assert!(detail.contains("U1"), "must name the IC: {detail}");
 
+        let associations = response["decoupling_associations"].as_array().unwrap();
+        assert_eq!(associations.len(), 2, "{response}");
+        for association in associations {
+            assert_eq!(association["ic"], "U1", "{association}");
+            assert_eq!(association["qualifying_net"], "VCC", "{association}");
+            assert_eq!(association["net_reference_count"], 4, "{association}");
+            assert_eq!(association["status"], "too_far", "{association}");
+        }
+        assert_eq!(
+            response["unproven_decoupling_caps"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0,
+            "{response}"
+        );
+
         // J1's hand-computed edge distance, reported even though it passes.
         let edges = response["connector_edges"].as_array().unwrap();
         assert_eq!(edges.len(), 1);
@@ -2184,6 +2409,68 @@ mod tests {
 
         // No live KiCad in this test — the saved file is the disclosed source.
         assert_eq!(response["source"], "saved_file");
+    }
+
+    /// #754: a global ground rail is connectivity, not evidence that this
+    /// particular capacitor belongs to this particular IC. C1's VCC pad is
+    /// moved to J1's /SIG_IN net, leaving GND as its only shared net with U1.
+    /// C2 keeps the fixture's proven low-fanout VCC relationship and remains
+    /// the sole deduction. The served response must disclose why C1 was not
+    /// scored rather than silently guessing or treating it as a pass.
+    #[tokio::test]
+    async fn served_score_does_not_infer_a_decoupling_relationship_from_ground_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = std::fs::read_to_string(FIXTURE).unwrap();
+        let board = write_variant(
+            &dir,
+            "ground_only_relationship.kicad_pcb",
+            rewrite_footprint_nets(&fixture, "C1", &[("VCC", "/SIG_IN")]),
+        );
+
+        let handler = crate::mcp::handler::McpHandler::new(crate::tools::ServerConfig {
+            kicad_cli: String::new(),
+            kicad_binary: String::new(),
+            ipc_address: String::new(),
+            project_dir: None,
+            jlcpcb_db_path: None,
+            auto_load_toolsets: true,
+            eager_toolsets: false,
+        })
+        .await
+        .unwrap();
+        let response = handler
+            .handle_message(json!({
+                "jsonrpc": "2.0",
+                "id": 754,
+                "method": "tools/call",
+                "params": {
+                    "name": "score_placement",
+                    "arguments": { "board": board.to_string_lossy() }
+                }
+            }))
+            .await
+            .unwrap()
+            .result
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+
+        assert_eq!(response["isError"], json!(false), "{body}");
+        assert_eq!(body["score"], 85, "only C2 may deduct: {body}");
+        assert_eq!(body["deductions"][0]["references"], json!(["C2"]));
+        assert_eq!(body["uncoupled_caps"], json!(["C1"]), "{body}");
+        assert_eq!(body["decoupling_associations"].as_array().unwrap().len(), 1);
+        assert_eq!(body["decoupling_associations"][0]["reference"], "C2");
+        let unproven = body["unproven_decoupling_caps"].as_array().unwrap();
+        assert_eq!(unproven.len(), 1, "{body}");
+        assert_eq!(unproven[0]["reference"], "C1");
+        assert!(
+            unproven[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("no IC shares a non-ground, low-fanout rail"),
+            "{body}"
+        );
     }
 
     /// #595: when the exact board is open live in KiCad, `score_placement`
@@ -3703,6 +3990,13 @@ mod tests {
         let args = json!({ "board": board.to_string_lossy() });
         let a = text_of(&handle_auto_place(&args, &test_ctx()).await.unwrap()).await;
         assert_eq!(a["dry_run"], true);
+        assert_eq!(a["applied"], false);
+        assert_eq!(a["source"], "saved_file");
+        assert_eq!(a["plan_status"], "blocked");
+        assert!(a["blocking_reasons"][0]
+            .as_str()
+            .unwrap()
+            .contains("autonomous whole-board mutation is retired"));
         assert_eq!(a["planned_moves"].as_array().unwrap().len(), 8, "{a}");
         assert_ne!(
             a["verdict_after_plan"], "hard_fail",
@@ -3713,34 +4007,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_place_apply_refuses_the_exact_open_board() {
+    async fn auto_place_apply_is_retired_and_never_writes() {
         let dir = tempfile::tempdir().unwrap();
         let board = fixture_copy(&dir);
         let before = std::fs::read(&board).unwrap();
-        let (ctx, _server) = ctx_with_open_board(&board);
-        let result = handle_auto_place(&json!({"board": board, "dry_run": false}), &ctx)
+        let result = handle_auto_place(&json!({"board": board, "dry_run": false}), &test_ctx())
             .await
             .unwrap();
 
         assert!(result.is_error);
-        assert!(result_text(&result).contains("auto_place_from_schematic"));
+        let body: serde_json::Value = serde_json::from_str(result_text(&result)).unwrap();
+        assert_eq!(body["error"]["kind"], "plan_blocked", "{body}");
+        assert_eq!(
+            body["error"]["operation"], "auto_place_from_schematic",
+            "{body}"
+        );
+        assert!(body["error"]["reasons"][0]
+            .as_str()
+            .unwrap()
+            .contains("autonomous whole-board mutation is retired"));
         assert_eq!(std::fs::read(&board).unwrap(), before);
     }
 
     #[tokio::test]
-    async fn auto_place_apply_proceeds_when_a_different_board_is_open() {
+    async fn served_auto_place_apply_is_structured_and_never_writes() {
         let dir = tempfile::tempdir().unwrap();
         let board = fixture_copy(&dir);
-        let other = dir.path().join("other.kicad_pcb");
-        std::fs::write(&other, "").unwrap();
         let before = std::fs::read(&board).unwrap();
-        let (ctx, _server) = ctx_with_open_board(&other);
-        let result = handle_auto_place(&json!({"board": board, "dry_run": false}), &ctx)
-            .await
-            .unwrap();
 
-        assert!(!result.is_error, "{result:?}");
-        assert_ne!(std::fs::read(&board).unwrap(), before);
+        let handler = crate::mcp::handler::McpHandler::new(crate::tools::ServerConfig {
+            kicad_cli: String::new(),
+            kicad_binary: String::new(),
+            ipc_address: String::new(),
+            project_dir: None,
+            jlcpcb_db_path: None,
+            auto_load_toolsets: true,
+            eager_toolsets: false,
+        })
+        .await
+        .unwrap();
+        let response = handler
+            .handle_message(json!({
+                "jsonrpc": "2.0",
+                "id": 7541,
+                "method": "tools/call",
+                "params": {
+                    "name": "auto_place_from_schematic",
+                    "arguments": { "board": board.to_string_lossy(), "dry_run": false }
+                }
+            }))
+            .await
+            .unwrap()
+            .result
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+
+        assert_eq!(response["isError"], json!(true), "{body}");
+        assert_eq!(body["error"]["kind"], "plan_blocked", "{body}");
+        assert_eq!(
+            body["error"]["operation"], "auto_place_from_schematic",
+            "{body}"
+        );
+        assert_eq!(std::fs::read(&board).unwrap(), before, "must not mutate");
     }
 
     /// #594: a non-rectangular outline cannot back a containment proof, so
