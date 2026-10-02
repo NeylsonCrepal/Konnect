@@ -3,6 +3,21 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: `konnect init` refreshes stale Claude hook matchers (patch release)
+
+A hook's `matcher` is built from the tool registry, so it changes when a board
+tool is added, renamed or reclassified. `konnect init` used to skip any hook
+whose command was already in `~/.claude/settings.json`, leaving an older
+install matching the old tool set. It now rewrites the matcher of an entry that
+holds only Konnect's handler. When a user handler shares that entry, Konnect's
+handler moves to a new entry with the current matcher, and the user's handler
+keeps its own. An install whose matcher is already current is not rewritten.
+Extra copies of Konnect's handler, such as a hand edit can leave, are removed
+so that each hook runs once.
+The `Hooks: N entries patched` count now includes refreshed entries and a
+removed legacy handler, so it is non-zero whenever the hook settings changed
+(#739).
+
 ## Unreleased: `create_schematic` and `set_schematic_page` move to `sch_hierarchy` (minor release)
 
 `create_schematic` and `set_schematic_page` move from the `sch_components`
