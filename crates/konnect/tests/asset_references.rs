@@ -720,6 +720,8 @@ fn backticked_tool_names_in_prose_exist_in_the_registry() {
         "sheet_instance_path",
         // Structured placement-score response field, not a callable tool.
         "interface_filter_caps",
+        "decoupling_associations",
+        "unproven_decoupling_caps",
         // Structured outline-shape response fields (#594), not callable tools.
         "outline_shape",
         "outline_unproven",
@@ -727,6 +729,9 @@ fn backticked_tool_names_in_prose_exist_in_the_registry() {
         // Shared placement-plan response fields, not callable tools.
         "plan_status",
         "blocking_reasons",
+        "plan_blocked",
+        // Placement evidence source value, not a callable tool.
+        "live_ipc",
         // Structured schematic-placement response fields, not callable tools.
         "junctions_added_count",
         "junctions_pruned_count",
