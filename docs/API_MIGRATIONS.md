@@ -3,6 +3,30 @@
 Konnect's tool schemas are public API. This file records intentional argument
 removals and the supported replacement workflow.
 
+## Unreleased: autonomous placement apply retired and decoupling evidence narrowed (#754)
+
+`auto_place_from_schematic` is now a deprecated diagnostic planner only. Its
+default dry-run still returns the deterministic proposed layout and placement
+scores, with `applied: false`, `plan_status: "blocked"`, and a reason explaining
+that autonomous whole-board mutation is retired. Passing `dry_run: false`
+returns structured `plan_blocked` before any board write. Callers should make
+small, explicit `move_component` operations, read the requested board back
+after each batch, and run placement scoring and DRC before continuing.
+
+`score_placement` no longer treats a shared ground rail as proof that a
+capacitor decouples the nearest IC. A decoupling-distance deduction now requires
+the capacitor and IC to share a non-ground net used by no more than eight
+distinct references. The response adds `decoupling_associations`, which names
+the qualifying net and its fanout, and `unproven_decoupling_caps`, which explains
+why no conservative association was made. The existing `uncoupled_caps` field
+is retained for compatibility. Scores can therefore increase on boards whose
+previous apparent cap-to-IC pairing was supported only by a board-wide rail.
+
+The deprecated `refine_placement_force_directed` planner continues to block
+non-improving plans, including score ties. Use explicit moves when a
+score-neutral change is justified by design intent rather than weakening this
+safety gate.
+
 ## Unreleased: bounded schematic-transfer create groups (#658, terminal increment)
 
 `update_pcb_from_schematic` now sends creates in ordered groups of at most 32
