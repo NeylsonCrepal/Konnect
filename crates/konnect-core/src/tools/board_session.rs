@@ -10,11 +10,13 @@
 //! leaves it behind. So when a board was live *with its lock present*, and that lock
 //! is later gone, KiCad closed the document itself and the saved file is
 //! authoritative. Any other case - lock still present, or never seen - keeps
-//! refusing.
+//! refusing, including when inspecting the lock fails.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+use super::live_board::{editor_lock, EditorLock};
 
 #[derive(Clone, Default)]
 pub(crate) struct BoardSessionMemory {
@@ -28,7 +30,10 @@ impl BoardSessionMemory {
         self.observed_live
             .lock()
             .expect("board-session memory poisoned")
-            .insert(board_key(board), lock_present(board));
+            .insert(
+                board_key(board),
+                matches!(editor_lock(board), EditorLock::Present(_)),
+            );
     }
 
     /// Whether this process currently holds a live observation for `board`.
@@ -52,6 +57,14 @@ impl BoardSessionMemory {
     /// `false`) while the lock is still present (crash, kill, or an unanswered
     /// close prompt) and when no lock was recorded at observation time.
     pub(crate) fn authorize_file_fallback(&self, board: &Path) -> bool {
+        self.authorize_file_fallback_with(board, || editor_lock(board))
+    }
+
+    fn authorize_file_fallback_with(
+        &self,
+        board: &Path,
+        inspect: impl FnOnce() -> EditorLock,
+    ) -> bool {
         let key = board_key(board);
         let mut observed = self
             .observed_live
@@ -60,25 +73,14 @@ impl BoardSessionMemory {
         let Some(lock_was_present) = observed.get(&key).copied() else {
             return true;
         };
-        if lock_was_present && !lock_present(board) {
+        // Inspect under the memory lock so this evidence cannot clear a newer
+        // live observation recorded concurrently.
+        if lock_was_present && matches!(inspect(), EditorLock::Absent) {
             observed.remove(&key);
             return true;
         }
         false
     }
-}
-
-/// The exact-board lock file KiCad writes beside the board: `~<name>.lck`.
-fn lock_path(board: &Path) -> Option<PathBuf> {
-    let name = board.file_name()?;
-    let mut lock = std::ffi::OsString::from("~");
-    lock.push(name);
-    lock.push(".lck");
-    Some(board.with_file_name(lock))
-}
-
-fn lock_present(board: &Path) -> bool {
-    lock_path(board).is_some_and(|lock| lock.exists())
 }
 
 /// Prefer filesystem identity. If the path cannot be canonicalized, retain a
@@ -183,6 +185,34 @@ mod tests {
 
         assert!(!memory.authorize_file_fallback(&board));
         assert!(memory.was_observed_live(&board));
+    }
+
+    #[test]
+    fn unreadable_lock_does_not_release_an_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let board = board_with_lock(dir.path(), "board.kicad_pcb");
+        let memory = BoardSessionMemory::default();
+        memory.observe_live(&board);
+        let lock = super::super::live_board::editor_lock_with(&board, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            ))
+        });
+        assert!(!memory.authorize_file_fallback_with(&board, || lock));
+        assert!(memory.was_observed_live(&board));
+    }
+
+    #[test]
+    fn a_later_live_observation_starts_a_new_lock_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let board = board_with_lock(dir.path(), "board.kicad_pcb");
+        let memory = BoardSessionMemory::default();
+        memory.observe_live(&board);
+        std::fs::remove_file(dir.path().join("~board.kicad_pcb.lck")).unwrap();
+        // A new live binding without a lock invalidates earlier close evidence.
+        memory.observe_live(&board);
+        assert!(!memory.authorize_file_fallback(&board));
     }
 
     #[test]

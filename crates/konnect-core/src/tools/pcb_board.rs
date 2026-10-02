@@ -317,21 +317,7 @@ where
             LiveBoard::LostAfterObservation {
                 situation,
                 ipc_unreachable,
-            } => {
-                // KiCad's sibling lock records how the editor went away: a close
-                // through KiCad's own path removes it, while a crash or a kill
-                // leaves it behind. When the transport is what went away, and the
-                // lock this process saw beside the board is now gone, KiCad closed
-                // the document itself and the saved file is authoritative, so the
-                // observation is released (#671). Every other case keeps refusing:
-                // a lock still present, or none ever seen, is no evidence of a
-                // clean close.
-                if ipc_unreachable && ctx.board_session.authorize_file_fallback(board_path) {
-                    BoardWrite::File(NoLiveBoard::Unreachable)
-                } else {
-                    BoardWrite::Refused(lost_board_refusal(board_path, situation, ipc_unreachable))
-                }
-            }
+            } => BoardWrite::Refused(lost_board_refusal(board_path, situation, ipc_unreachable)),
         },
     )
 }
