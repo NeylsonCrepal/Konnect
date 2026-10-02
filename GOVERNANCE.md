@@ -197,6 +197,10 @@ Within an overlap set the order is not arbitrary:
   on — are a **patch**.
 - Release notes state behaviour changes **and** known limitations. A reader who
   sees "fixed" and stops checking has been failed by the notes.
+- Before creating the tag, manually dispatch `.github/workflows/release.yml`
+  against the exact candidate ref. That non-publishing entry point runs the
+  release-profile target matrix, PCM packages, and reusable real-KiCad gate;
+  only a pushed `v*` tag may execute the publication job.
 - The pre-release gate is CI, the real-KiCad E2E workflow, the live IPC tests,
   and an end-to-end benchmark run against the candidate. The benchmark has
   twice found what CI could not; it is a step, not a nicety.
