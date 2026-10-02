@@ -44,7 +44,7 @@ and Windows servers do not.
 
 | Tool | Purpose |
 |------|---------|
-| `get_installation_info` | Report the serving build version and commit, executable path, verified install source, on-disk binary version, KiCad CLI version, redacted IPC endpoint, proven stale-process evidence, and platform-specific restart guidance. |
+| `get_installation_info` | Report the serving build version and commit, executable path, verified install source, on-disk binary version, KiCad CLI version, redacted IPC endpoint, proven stale-process evidence, platform-specific restart guidance, and whether installed skills, agents, and hooks match this build's bundle. |
 
 ### Unix stdio maintenance
 

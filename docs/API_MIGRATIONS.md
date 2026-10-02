@@ -134,6 +134,43 @@ never reads the board file in its place. KiCad 10 declares
 Setup (#716). This is an additive tool and response surface planned for the
 next minor release.
 
+## Unreleased: installed guidance drift is reported (minor release)
+
+`get_installation_info` adds a `guidance` object (#728). From the standalone
+binary it holds `probe_status: "ok"`, `bundle_version`, and one entry each for
+`claude` and `codex`: a `state` (`not_installed`, `current`, `out_of_sync`),
+the install `marker` (`path`, `version`, `legacy`) or `null`, and per-item
+`files` and `hooks` whose `status` is `current`, `different`, `missing`, or
+`unreadable`. A `different` hook adds a `reason`: `legacy_handler` or
+`other_executable`. `marker.version` is `null` when the marker is not a plain
+version string. A client with no marker and no installed file is
+`not_installed` even if hooks remain, since `uninstall` removes only the hooks
+of the binary that runs it. An embedded or library server reports
+`probe_status: "not_available"`.
+
+The server checks each client once per installed guidance version, identified
+by the install marker alone. A new binary over the same marker does not
+rescan. The first start for a marker scans and records the
+state in `~/.konnect/.guidance-checked-claude` or `.guidance-checked-codex`.
+`konnect init` and `konnect uninstall` delete that client's record, so a
+re-init with the same version is checked again.
+Each client entry carries `checked`: `now` when this process scanned, or
+`earlier` when it reuses the record. An `earlier` entry has `state` and
+`marker` but no `files` or `hooks`.
+
+The `initialize` result gains `instructions`, present only on the first
+`initialize` after a scan that found a client `out_of_sync`. It holds one line
+per such client, naming the marker version and the `konnect init` command to
+run. Later starts with the same install marker omit it.
+
+`konnect status` prints `[current]`, `[different]`, `[missing]`, or
+`[unreadable]` for each skill file, agent, and hook in place of `[+]`/`[-]`,
+and a closing `Guidance:` state line.
+
+Nothing is installed or rewritten; the only files written are the two
+records. A differing file is not classified as stale
+or user-modified, because the version-only marker cannot tell them apart.
+
 ## Unreleased: opt-in custom fields in `batch_edit_schematic_components` (minor release)
 
 `batch_edit_schematic_components` adds an optional `create_missing` boolean,

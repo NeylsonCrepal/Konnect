@@ -297,7 +297,8 @@ pub fn meta_tool_descriptions_for(reload_enabled: bool) -> Vec<McpToolDescriptio
                 "Report read-only provenance for the Konnect process serving this call: build \
                  version and commit when available, executable path, conservatively detected \
                  install source, on-disk binary version, KiCad CLI version, redacted IPC \
-                 endpoint, proven newer-binary state, and platform-specific restart guidance."
+                 endpoint, proven newer-binary state, platform-specific restart guidance, and \
+                 whether installed skills, agents, and hooks match this build's bundle."
                     .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -662,7 +663,12 @@ async fn handle_server_stats(ctx: &std::sync::Arc<ToolContext>) -> CallToolResul
 }
 
 async fn handle_get_installation_info(ctx: &std::sync::Arc<ToolContext>) -> CallToolResult {
-    let info = crate::runtime_info::collect(&ctx.config, &ctx.config_resolution).await;
+    let info = crate::runtime_info::collect(
+        &ctx.config,
+        &ctx.config_resolution,
+        ctx.guidance.get().map(|probe| probe.as_ref()),
+    )
+    .await;
     CallToolResult::json(&info)
 }
 

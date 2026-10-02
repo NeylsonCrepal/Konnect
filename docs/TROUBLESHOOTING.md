@@ -70,6 +70,36 @@ Follow the returned platform-specific guidance, restart the MCP client (and
 KiCad when it owns the server process), then call `get_installation_info` again
 to verify the process that actually restarted. This diagnostic writes nothing.
 
+## Installed guidance is out of date
+
+`konnect init` writes skills, agents, and Claude hooks once. Upgrading Konnect
+does not touch them, so an older install keeps advising the old tools. Run
+`konnect status` (add `--client codex` for Codex) with the binary your MCP
+client uses. Each file and hook is compared with that binary's bundle:
+
+| Status | Meaning |
+|--------|---------|
+| `current` | Byte-identical to the bundle, or the exact hook command `init` writes |
+| `different` | Present, but not identical. It may be an older release's copy or your own edit; the install marker records only a version, so the two cannot be told apart |
+| `missing` | Not present |
+| `unreadable` | Present but could not be read, or `settings.json` is not valid JSON or not the shape Claude expects |
+
+A `different` hook carries a reason: `legacy_handler` is the pre-hook-JSON
+`… skill <name>` form, which Claude ignores, and `other_executable` is a hook
+that runs another Konnect binary, written exactly as `konnect init` writes it.
+
+The serving process makes the same comparison for both clients once per
+installed guidance version, meaning each install marker. The first start
+for that marker scans, records the resulting state in
+`~/.konnect/.guidance-checked-<client>`, and sets the MCP `initialize`
+`instructions` to a one-line notice when either client is `out_of_sync`. Later
+starts read the record instead of rescanning and give no notice. Running
+`konnect init` starts a new check. Upgrading the binary alone does not. `get_installation_info` reports the
+result under `guidance`; its `checked` field is `now` for a scan in this
+process, with per-file detail, or `earlier` for a recorded state without it.
+`konnect status` always scans. Nothing rewrites guidance. Run `konnect init` to
+update. It overwrites `different` files, so save any edits you made first.
+
 ## "KiCAD IPC socket path not configured"
 
 Any tool that talks to a live KiCAD session (`save_project`, PCB editing,

@@ -178,7 +178,18 @@ konnect uninstall --client codex
 
 MCP server startup never installs or restores guidance. Run `konnect init`
 explicitly when you want those files installed; after `konnect uninstall`,
-starting the server leaves them removed. `--client` remains accepted in server
+starting the server leaves them removed.
+
+Guidance written by an older `konnect init` is not updated by upgrading the
+binary. `konnect status` compares every installed skill, agent, and hook with
+the bundle in the binary you run and marks each `current`, `different`, or
+`missing`. The server makes the same check once for each installed version:
+the first start after `konnect init` compares the files, records
+the result in `~/.konnect`, and adds a one-line notice to its `initialize`
+instructions if guidance is out of sync. Later starts reuse that record, so
+guidance you chose to keep is not reported again. `get_installation_info`
+shows the result. Re-run `konnect init` to update it.
+It overwrites differing files, so keep a copy of any file you edited. `--client` remains accepted in server
 commands for compatibility. For example, register a standalone binary with the
 Codex CLI using:
 
