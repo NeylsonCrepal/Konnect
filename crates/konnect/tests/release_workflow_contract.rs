@@ -50,6 +50,29 @@ fn release_workflow_has_a_non_publishing_pre_tag_entry_point() {
 }
 
 #[test]
+fn release_pcm_validation_uses_the_effective_release_version() {
+    let release = workflow("release.yml");
+    let validation = release["jobs"]["pcm-package"]["steps"]
+        .as_array()
+        .expect("PCM package steps must be an array")
+        .iter()
+        .find(|step| step["name"] == "Validate PCM package against KiCAD schema (release gate)")
+        .expect("release workflow must validate PCM packages");
+    let script = validation["run"]
+        .as_str()
+        .expect("PCM validation step must have a shell script");
+
+    assert!(
+        script.contains("version=\"${RELEASE_VERSION#v}\""),
+        "PCM validation must use the effective version shared by tag and dry-run builds"
+    );
+    assert!(
+        !script.contains("GITHUB_REF_NAME"),
+        "a workflow_dispatch run uses the main branch ref, not the synthetic package version"
+    );
+}
+
+#[test]
 fn workflows_do_not_depend_on_node20_setup_protoc() {
     for name in ["ci.yml", "e2e-kicad.yml", "release.yml"] {
         let source =
